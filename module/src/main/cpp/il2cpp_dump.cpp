@@ -1,7 +1,7 @@
 //
 // Created by Perfare on 2020/7/4.
 //
-
+#define _GNU_SOURCE
 #include "il2cpp_dump.h"
 #include <dlfcn.h>
 #include <cstdlib>

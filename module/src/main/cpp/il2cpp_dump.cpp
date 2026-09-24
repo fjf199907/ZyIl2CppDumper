@@ -434,15 +434,17 @@ void il2cpp_api_init(void *handle) {
             il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
         }
     }
-    LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    // Wait for the runtime, only if the probe resolved.
-    if (il2cpp_is_vm_thread) {
-        for (int i = 0; i < 120 && !il2cpp_is_vm_thread(nullptr); ++i) {
+       LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
+    // Wait for the runtime readiness via il2cpp_domain_get.
+    // NOTE: Do NOT call il2cpp_is_vm_thread(nullptr) — Unity 6000 dereferences
+    // the argument without a null check, causing a SIGSEGV crash at fault addr 0x10.
+    if (il2cpp_domain_get) {
+        for (int i = 0; i < 120 && !il2cpp_domain_get(); ++i) {
             LOGI("Waiting for il2cpp_init...");
             sleep(1);
         }
     } else {
-        LOGW("il2cpp_is_vm_thread missing; skipping vm-thread wait");
+        LOGW("il2cpp_domain_get missing; skipping runtime wait");
     }
     if (il2cpp_domain_get && il2cpp_thread_attach) {
         auto domain = il2cpp_domain_get();

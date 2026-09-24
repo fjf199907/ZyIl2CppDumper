@@ -16,12 +16,16 @@
 #include <link.h>
 #include <csetjmp>
 #include <csignal>
-#include <pthread.h>        // ★ 新增
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/socket.h>        // ★ 新增
+#include <netinet/in.h>        // ★ 新增
+#include <arpa/inet.h>         // ★ 新增
+#include <errno.h>             // ★ 新增
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
-#include <sys/stat.h>
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -30,7 +34,7 @@
 #undef DO_API
 
 static uint64_t il2cpp_base = 0;
-static void *g_il2cpp_handle = nullptr;   // ★ 新增: 供 health 扫描线程使用
+static void *g_il2cpp_handle = nullptr;
 
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
@@ -99,7 +103,6 @@ bool _il2cpp_type_is_byref(const Il2CppType *type) {
     return byref;
 }
 
-// Format a const field's value; only primitives and strings are representable, else "".
 std::string get_field_default_value(FieldInfo *field, const Il2CppType *field_type) {
     std::stringstream outPut;
     if (!il2cpp_field_static_get_value) {
@@ -414,7 +417,7 @@ std::string dump_type(const Il2CppType *type) {
 
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
-    g_il2cpp_handle = handle;          // ★ 新增: 保存 handle
+    g_il2cpp_handle = handle;
     init_il2cpp_api(handle);
     xdl_info_t xinfo{};
     if (xdl_info(handle, XDL_DI_DLINFO, &xinfo) == 0 && xinfo.dli_fbase) {
@@ -423,8 +426,6 @@ void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
 }
 
-// Scoped SIGSEGV/SIGBUS guard: skip decoy classes whose malformed metadata
-// faults inside libil2cpp, instead of crashing the whole dump.
 static sigjmp_buf g_dump_jmp;
 static volatile sig_atomic_t g_dump_guard_active = 0;
 static pid_t g_dump_tid = 0;
@@ -463,7 +464,6 @@ static void remove_dump_guard() {
 }
 
 // ---------------------------------------------------------------------------
-// --- 追加 ---
 void dump_il2cpp_so(const char *outDir) {
     struct Seg { uint64_t start, end; };
     std::vector<Seg> segs;
@@ -519,12 +519,9 @@ void dump_il2cpp_so(const char *outDir) {
     }
     free(buf);
 }
-// --- /追加 ---
 
 // ===========================================================================
-// ★ 新增: 运行时枚举 Health / CharacterStat / PlayerStates / HealthBar
-// 因为这几个是 HybridCLR 热更类, 不在 global-metadata.dat 里, Il2CppDumper 看不到。
-// 直接走 il2cpp domain/assembly/image/class/field 的运行时 API, 打印字段偏移。
+// ★ RPC server
 // ===========================================================================
 
 struct HealthScanApi {
@@ -565,110 +562,266 @@ static bool resolve_health_api(HealthScanApi &api, void *handle) {
               && api.field_get_name && api.field_get_offset && api.field_get_type
               && api.class_from_type;
     LOGI("resolve_health_api: %s", ok ? "ok" : "FAILED");
-    LOGI("  domain_get=%p dga=%p agi=%p", api.domain_get, api.domain_get_assemblies, api.assembly_get_image);
-    LOGI("  igcc=%p igc=%p ign=%p", api.image_get_class_count, api.image_get_class, api.image_get_name);
-    LOGI("  cgn=%p cgn2=%p cgf=%p", api.class_get_namespace, api.class_get_name, api.class_get_fields);
-    LOGI("  fgn=%p fgo=%p fgt=%p cft=%p",
-         api.field_get_name, api.field_get_offset, api.field_get_type, api.class_from_type);
     return ok;
 }
 
-static int scan_health_classes_once(FILE *out, HealthScanApi &api) {
-    void *domain = api.domain_get();
-    if (!domain) return -1;
+static HealthScanApi g_rpc_api;
+static bool g_rpc_api_ok = false;
+
+static void rpc_dump_class(FILE *out, void *klass) {
+    const char *ns   = g_rpc_api.class_get_namespace(klass);
+    const char *name = g_rpc_api.class_get_name(klass);
+    fprintf(out, "=== class %s.%s ===\n", ns ? ns : "", name ? name : "?");
+
+    void *fiter = nullptr;
+    while (auto field = g_rpc_api.class_get_fields(klass, &fiter)) {
+        void *fieldType = g_rpc_api.field_get_type(field);
+        const char *typeName = "?";
+        if (fieldType) {
+            void *fieldClass = g_rpc_api.class_from_type(fieldType);
+            if (fieldClass) {
+                const char *tn = g_rpc_api.class_get_name(fieldClass);
+                if (tn) typeName = tn;
+            }
+        }
+        fprintf(out, "  field %-40s offset=0x%zx type=%s\n",
+                g_rpc_api.field_get_name(field),
+                g_rpc_api.field_get_offset(field),
+                typeName);
+    }
+}
+
+static int rpc_scan(FILE *out, const char *imagePattern,
+                    const char *classPattern, bool dumpAllInMatchedImage) {
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) { fprintf(out, "ERR: domain_get failed\n"); return -1; }
 
     size_t asmCount = 0;
-    void **assemblies = (void **)api.domain_get_assemblies(domain, &asmCount);
-    if (!assemblies) return -1;
-    if (out) fprintf(out, "assemblies count = %zu\n", asmCount);
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+    if (!assemblies) { fprintf(out, "ERR: dga failed\n"); return -1; }
+    fprintf(out, "assemblies count = %zu\n", asmCount);
 
     int hits = 0;
     for (size_t i = 0; i < asmCount; ++i) {
-        void *image = api.assembly_get_image(assemblies[i]);
+        void *image = g_rpc_api.assembly_get_image(assemblies[i]);
         if (!image) continue;
 
-        const char *imageName = api.image_get_name ? api.image_get_name(image) : "?";
-        size_t classCount = api.image_get_class_count(image);
+        const char *imageName = g_rpc_api.image_get_name
+                              ? g_rpc_api.image_get_name(image) : "?";
+        if (!imageName) imageName = "?";
 
+        bool imageMatched = imagePattern && strstr(imageName, imagePattern);
+        bool dumpAll = dumpAllInMatchedImage && imageMatched;
+        if (imagePattern && !imageMatched && !classPattern) continue;
+
+        size_t classCount = g_rpc_api.image_get_class_count(image);
         for (size_t j = 0; j < classCount; ++j) {
-            void *klass = api.image_get_class(image, j);
+            void *klass = g_rpc_api.image_get_class(image, j);
             if (!klass) continue;
-
-            const char *ns   = api.class_get_namespace(klass);
-            const char *name = api.class_get_name(klass);
+            const char *name = g_rpc_api.class_get_name(klass);
             if (!name) continue;
 
-            bool hit = strstr(name, "Health")
-                    || strstr(name, "CharacterStat")
-                    || strstr(name, "PlayerStates")
-                    || strstr(name, "HealthBar")
-                    || (ns && strstr(ns, "Health"));
+            bool hit = dumpAll;
+            if (!hit && classPattern) hit = strstr(name, classPattern) != nullptr;
+            if (!hit && imagePattern) hit = imageMatched;
             if (!hit) continue;
 
             ++hits;
-            if (out) {
-                fprintf(out, "\n=== image=%s class %s.%s ===\n",
-                        imageName ? imageName : "?", ns ? ns : "", name);
-            }
-
-            void *fiter = nullptr;
-            while (auto field = api.class_get_fields(klass, &fiter)) {
-                void *fieldType = api.field_get_type(field);
-                const char *typeName = "?";
-                if (fieldType) {
-                    void *fieldClass = api.class_from_type(fieldType);
-                    if (fieldClass) {
-                        const char *tn = api.class_get_name(fieldClass);
-                        if (tn) typeName = tn;
-                    }
-                }
-                if (out) {
-                    fprintf(out, "  field %-32s offset=0x%zx type=%s\n",
-                            api.field_get_name(field),
-                            api.field_get_offset(field),
-                            typeName);
-                }
-            }
+            fprintf(out, "\n[image=%s]\n", imageName);
+            rpc_dump_class(out, klass);
         }
     }
-    if (out) fflush(out);
+    fprintf(out, "\n--- total %d ---\n", hits);
     return hits;
 }
 
-static void* health_scanner_thread(void *arg) {
-    void *handle = arg;
+static void rpc_handle(const char *cmd, FILE *out) {
+    while (*cmd == ' ' || *cmd == '\t') cmd++;
+    if (!*cmd) return;
 
-    HealthScanApi api;
-    if (!resolve_health_api(api, handle)) {
-        LOGE("health scan: resolve api failed, abort");
+    if (strcmp(cmd, "ping") == 0) {
+        fprintf(out, "pong\n");
+    }
+    else if (strcmp(cmd, "base") == 0) {
+        fprintf(out, "il2cpp_base=0x%" PRIx64 "\n", il2cpp_base);
+    }
+    else if (strcmp(cmd, "images") == 0) {
+        void *domain = g_rpc_api.domain_get();
+        size_t asmCount = 0;
+        void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+        for (size_t i = 0; i < asmCount; ++i) {
+            void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+            if (!image) continue;
+            const char *n = g_rpc_api.image_get_name ? g_rpc_api.image_get_name(image) : "?";
+            fprintf(out, "%s\n", n ? n : "?");
+        }
+    }
+    else if (strncmp(cmd, "scan ", 5) == 0) {
+        char img[128] = {0}, cls[128] = {0};
+        int n = sscanf(cmd + 5, "%127s %127s", img, cls);
+        const char *imgP = (n >= 1 && strcmp(img, "_") != 0) ? img : nullptr;
+        const char *clsP = (n >= 2 && strcmp(cls, "_") != 0) ? cls : nullptr;
+        rpc_scan(out, imgP, clsP, false);
+    }
+    else if (strncmp(cmd, "dumpimage ", 10) == 0) {
+        char img[128] = {0};
+        if (sscanf(cmd + 10, "%127s", img) == 1) {
+            rpc_scan(out, img, nullptr, true);
+        }
+    }
+    else if (strncmp(cmd, "class ", 6) == 0) {
+        char cls[256] = {0};
+        if (sscanf(cmd + 6, "%255s", cls) == 1) {
+            void *domain = g_rpc_api.domain_get();
+            size_t asmCount = 0;
+            void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+            int found = 0;
+            for (size_t i = 0; i < asmCount; ++i) {
+                void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+                if (!image) continue;
+                size_t classCount = g_rpc_api.image_get_class_count(image);
+                for (size_t j = 0; j < classCount; ++j) {
+                    void *klass = g_rpc_api.image_get_class(image, j);
+                    if (!klass) continue;
+                    const char *name = g_rpc_api.class_get_name(klass);
+                    const char *ns   = g_rpc_api.class_get_namespace(klass);
+                    if (!name) continue;
+                    char full[512];
+                    snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name);
+                    if (strcmp(full, cls) == 0 || strcmp(name, cls) == 0) {
+                        rpc_dump_class(out, klass);
+                        found++;
+                    }
+                }
+            }
+            fprintf(out, "\n--- found %d ---\n", found);
+        }
+    }
+    else if (strncmp(cmd, "read ", 5) == 0) {
+        uint64_t addr = 0; int size = 0;
+        if (sscanf(cmd + 5, "%" SCNx64 " %d", &addr, &size) == 2 && size > 0 && size <= 4096) {
+            uint8_t *p = (uint8_t *)addr;
+            for (int i = 0; i < size; i += 16) {
+                fprintf(out, "%016" PRIx64 "  ", addr + i);
+                for (int k = 0; k < 16 && i + k < size; ++k)
+                    fprintf(out, "%02x ", p[i + k]);
+                fprintf(out, " |");
+                for (int k = 0; k < 16 && i + k < size; ++k) {
+                    char c = p[i + k];
+                    fprintf(out, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
+                }
+                fprintf(out, "|\n");
+            }
+        } else {
+            fprintf(out, "ERR: usage: read <addr_hex> <size>\n");
+        }
+    }
+    else if (strncmp(cmd, "write ", 6) == 0) {
+        uint64_t addr = 0; char hex[1024] = {0};
+        if (sscanf(cmd + 6, "%" SCNx64 " %1023s", &addr, hex) == 2) {
+            size_t hlen = strlen(hex);
+            if (hlen % 2 != 0) { fprintf(out, "ERR: hex len odd\n"); }
+            else {
+                uint8_t *p = (uint8_t *)addr;
+                for (size_t i = 0; i < hlen; i += 2) {
+                    unsigned v; sscanf(hex + i, "%2x", &v);
+                    p[i / 2] = (uint8_t)v;
+                }
+                fprintf(out, "ok, wrote %zu bytes\n", hlen / 2);
+            }
+        } else {
+            fprintf(out, "ERR: usage: write <addr_hex> <hex>\n");
+        }
+    }
+    else if (strncmp(cmd, "readf ", 6) == 0) {
+        uint64_t addr = 0;
+        if (sscanf(cmd + 6, "%" SCNx64, &addr) == 1) {
+            float f; memcpy(&f, (void*)addr, 4);
+            fprintf(out, "float @0x%" PRIx64 " = %f\n", addr, f);
+        }
+    }
+    else if (strncmp(cmd, "readi ", 6) == 0) {
+        uint64_t addr = 0;
+        if (sscanf(cmd + 6, "%" SCNx64, &addr) == 1) {
+            int32_t v; memcpy(&v, (void*)addr, 4);
+            fprintf(out, "int32 @0x%" PRIx64 " = %d\n", addr, v);
+        }
+    }
+    else {
+        fprintf(out, "ERR: unknown cmd\n");
+        fprintf(out, "cmds: ping | base | images | scan <img> <cls> | "
+                     "dumpimage <img> | class <name> | "
+                     "read <addr> <sz> | write <addr> <hex> | "
+                     "readf <addr> | readi <addr>\n");
+    }
+}
+
+static void* rpc_server_thread(void*) {
+    if (!resolve_health_api(g_rpc_api, g_il2cpp_handle)) {
+        LOGE("rpc: resolve il2cpp api failed");
         return nullptr;
     }
+    g_rpc_api_ok = true;
+    LOGI("rpc: api resolved, starting server");
 
-    const char *path = "/data/user/0/com.pinkcore.majo.erolabs/files/health_classes.txt";
-    FILE *out = fopen(path, "w");
-    if (!out) LOGE("health scan: open %s failed", path);
-    LOGI("health scan: start, out=%s", path);
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) { LOGE("rpc: socket failed %s", strerror(errno)); return nullptr; }
 
-    for (int round = 0; round < 300; ++round) {
-        sleep(2);
-        int hits = scan_health_classes_once(out, api);
-        if (hits > 0) {
-            LOGI("health scan: round %d hits=%d, done", round, hits);
-            if (out) { fclose(out); out = nullptr; }
-            return nullptr;
-        }
-        if ((round % 5) == 0) {
-            LOGI("health scan: round %d hits=0, keep waiting", round);
-        }
+    int opt = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(27042);
+    if (bind(srv, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        LOGE("rpc: bind 27042 failed: %s", strerror(errno));
+        close(srv);
+        return nullptr;
     }
+    listen(srv, 4);
+    LOGI("rpc: listening on 127.0.0.1:27042");
 
-    if (out) fclose(out);
-    LOGI("health scan: timeout, no class found");
+    while (true) {
+        int cli = accept(srv, nullptr, nullptr);
+        if (cli < 0) { usleep(100000); continue; }
+        LOGI("rpc: client connected");
+
+        char line[512];
+        while (true) {
+            int n = 0;
+            while (n < (int)sizeof(line) - 1) {
+                char c;
+                ssize_t r = read(cli, &c, 1);
+                if (r <= 0) goto cli_done;
+                if (c == '\n') break;
+                line[n++] = c;
+            }
+            line[n] = 0;
+            if (n == 0) continue;
+
+            char *buf = nullptr;
+            size_t buflen = 0;
+            FILE *out = open_memstream(&buf, &buflen);
+            if (!out) { goto cli_done; }
+
+            rpc_handle(line, out);
+            fclose(out);
+
+            if (buf) {
+                write(cli, buf, buflen);
+                free(buf);
+            }
+            char eof = 0x04;
+            write(cli, &eof, 1);
+        }
+    cli_done:
+        close(cli);
+        LOGI("rpc: client disconnected");
+    }
     return nullptr;
 }
 
-// ===========================================================================
-// ★ /新增
 // ===========================================================================
 
 void il2cpp_dump(const char *outDir) {
@@ -749,17 +902,17 @@ void il2cpp_dump(const char *outDir) {
                 g_dump_guard_active = 0;
                 remove_dump_guard();
 
-                // ★ 新增: 启动 health 扫描线程
+                // ★ 启动 RPC server（取代 health_scanner_thread）
                 if (g_il2cpp_handle) {
                     pthread_t th;
-                    if (pthread_create(&th, nullptr, health_scanner_thread, g_il2cpp_handle) == 0) {
+                    if (pthread_create(&th, nullptr, rpc_server_thread, nullptr) == 0) {
                         pthread_detach(th);
-                        LOGI("health scanner thread started");
+                        LOGI("rpc server thread started");
                     } else {
-                        LOGE("failed to create health scanner thread");
+                        LOGE("failed to create rpc server thread");
                     }
                 } else {
-                    LOGE("g_il2cpp_handle is null, skip health scanner");
+                    LOGE("g_il2cpp_handle is null, skip rpc server");
                 }
 
                 return;

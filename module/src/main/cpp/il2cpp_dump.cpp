@@ -475,7 +475,10 @@ static void remove_dump_guard() {
 void il2cpp_dump(const char *outDir) {
     LOGI("memory scan dump start");
 
-    // 输出目录准备一次即可
+    // 关键 1:把信号保护装上
+    install_dump_guard();
+    g_dump_guard_active = 1;
+
     char dirPath[512];
     snprintf(dirPath, sizeof(dirPath), "%s/files", outDir);
     mkdir(dirPath, 0777);
@@ -485,76 +488,76 @@ void il2cpp_dump(const char *outDir) {
 
     const uint8_t MAGIC[4] = {0xAF, 0x1B, 0xB1, 0xFA};
 
-    // 轮询 60 秒，每秒重扫一次，直到命中真 metadata
     for (int attempt = 1; attempt <= 60; ++attempt) {
         sleep(1);
 
-        // ---- 枚举可读 region ----
         struct Region { uint64_t start; uint64_t end; };
         std::vector<Region> regions;
         FILE *fp = fopen("/proc/self/maps", "r");
-        if (!fp) { LOGE("cannot open /proc/self/maps"); return; }
-
+        if (!fp) { LOGE("cannot open maps"); break; }
         char line[1024];
         while (fgets(line, sizeof(line), fp)) {
-            uint64_t start = 0, end = 0;
+            uint64_t s = 0, e = 0;
             char perms[8] = {0};
-            if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s", &start, &end, perms) != 3) continue;
-            if (perms[0] != 'r') continue;                    // 只扫可读
-            if (end <= start) continue;
-            uint64_t sz = end - start;
-            if (sz < 0x10000) continue;                       // 太小的跳过
-            if (sz > 512ull * 1024 * 1024) continue;          // 太大跳过
-            regions.push_back({start, end});
+            if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s", &s, &e, perms) != 3) continue;
+            if (perms[0] != 'r') continue;
+            if (e <= s) continue;
+            uint64_t sz = e - s;
+            if (sz < 0x10000 || sz > 512ull * 1024 * 1024) continue;
+            regions.push_back({s, e});
         }
         fclose(fp);
 
-        // ---- 逐 region 扫魔数 ----
         for (auto &r : regions) {
+            // 关键 2:每个 region 单独 setjmp,
+            // region 被 munmap 时跳到 recover 继续下一个
+            if (sigsetjmp(g_dump_jmp, 1) != 0) {
+                LOGW("region %" PRIx64 "-%" PRIx64 " faulted, skip", r.start, r.end);
+                continue;
+            }
+
             uint8_t *base = (uint8_t *)r.start;
             uint64_t sz = r.end - r.start;
 
             for (uint64_t off = 0; off + 16 < sz; off += 4) {
-                // 先比第一字节，快过 memcmp
                 if (base[off] != 0xAF) continue;
                 if (memcmp(base + off, MAGIC, 4) != 0) continue;
 
                 uint32_t version = 0;
                 memcpy(&version, base + off + 4, 4);
-
                 if (version < 20 || version > 31) continue;
 
-                // 二次验证：紧跟的 stringLiteralOffset 应当接近 header 尾部，
-                // 对 Unity 6000(31) 大致是个合理的小值（< 0x10000），防止撞巧合。
-                int32_t stringLiteralOffset = 0;
-                if (off + 12 < sz) memcpy(&stringLiteralOffset, base + off + 8, 4);
-                if (stringLiteralOffset < 0 || stringLiteralOffset > 0x200000) {
-                    LOGW("reject candidate @ %" PRIx64 " ver=%u sl=%d",
-                         r.start + off, version, stringLiteralOffset);
-                    continue;
-                }
+                int32_t sl = 0;
+                memcpy(&sl, base + off + 8, 4);
+                if (sl < 0 || sl > 0x200000) continue;
 
-                LOGI("HIT candidate @ %" PRIx64 " ver=%u sl=0x%x (attempt %d)",
-                     r.start + off, version, stringLiteralOffset, attempt);
+                LOGI("HIT @ %" PRIx64 " ver=%u sl=0x%x (try %d)",
+                     r.start + off, version, sl, attempt);
 
                 uint64_t remaining = sz - off;
                 uint64_t dumpSize = remaining > (128ull * 1024 * 1024)
-                                    ? (128ull * 1024 * 1024)
-                                    : remaining;
+                                    ? (128ull * 1024 * 1024) : remaining;
 
+                // 关键 3:写盘也包在 guard 里 —— 如果这块区域在写过程中被换掉
+                if (sigsetjmp(g_dump_jmp, 1) != 0) {
+                    LOGW("faulted while writing, skip");
+                    continue;
+                }
                 FILE *out = fopen(path, "wb");
-                if (!out) { LOGE("cannot create %s", path); continue; }
-                size_t written = fwrite(base + off, 1, dumpSize, out);
+                if (!out) { LOGE("fopen fail"); continue; }
+                size_t w = fwrite(base + off, 1, dumpSize, out);
                 fclose(out);
+                LOGI("dumped %zu bytes -> %s", w, path);
 
-                LOGI("dumped %zu bytes @ %" PRIx64 " ver=%u -> %s",
-                     written, r.start + off, version, path);
+                g_dump_guard_active = 0;
+                remove_dump_guard();
                 return;
             }
         }
-
-        LOGI("attempt %d: no metadata yet (%zu regions)", attempt, regions.size());
+        LOGI("attempt %d: %zu regions, no hit", attempt, regions.size());
     }
 
-    LOGI("no metadata candidate found after 60s");
+    g_dump_guard_active = 0;
+    remove_dump_guard();
+    LOGI("no metadata found");
 }

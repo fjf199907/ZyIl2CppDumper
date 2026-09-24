@@ -4,8 +4,8 @@ ext {
     moduleName = "Zygisk - Il2CppDumper"
     moduleAuthor = "codehasan & Perfare"
     moduleDescription = "Dumps IL2CPP metadata from a Unity game at runtime."
-    moduleVersion = "v1.6.9"
-    moduleVersionCode = 14
+    moduleVersion = "v1.7.0"
+    moduleVersionCode = 15
     moduleUpdateRepo = "codehasan/Zygisk-Il2CppDumper"
     moduleUpdateBranch = "master"
 }

@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -53,138 +54,72 @@ std::string get_method_modifier(uint32_t flags) {
     std::stringstream outPut;
     auto access = flags & METHOD_ATTRIBUTE_MEMBER_ACCESS_MASK;
     switch (access) {
-        case METHOD_ATTRIBUTE_PRIVATE:
-            outPut << "private ";
-            break;
-        case METHOD_ATTRIBUTE_PUBLIC:
-            outPut << "public ";
-            break;
-        case METHOD_ATTRIBUTE_FAMILY:
-            outPut << "protected ";
-            break;
+        case METHOD_ATTRIBUTE_PRIVATE:        outPut << "private "; break;
+        case METHOD_ATTRIBUTE_PUBLIC:         outPut << "public "; break;
+        case METHOD_ATTRIBUTE_FAMILY:         outPut << "protected "; break;
         case METHOD_ATTRIBUTE_ASSEM:
-        case METHOD_ATTRIBUTE_FAM_AND_ASSEM:
-            outPut << "internal ";
-            break;
-        case METHOD_ATTRIBUTE_FAM_OR_ASSEM:
-            outPut << "protected internal ";
-            break;
+        case METHOD_ATTRIBUTE_FAM_AND_ASSEM:  outPut << "internal "; break;
+        case METHOD_ATTRIBUTE_FAM_OR_ASSEM:   outPut << "protected internal "; break;
     }
-    if (flags & METHOD_ATTRIBUTE_STATIC) {
-        outPut << "static ";
-    }
+    if (flags & METHOD_ATTRIBUTE_STATIC) outPut << "static ";
     if (flags & METHOD_ATTRIBUTE_ABSTRACT) {
         outPut << "abstract ";
-        if ((flags & METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK) == METHOD_ATTRIBUTE_REUSE_SLOT) {
+        if ((flags & METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK) == METHOD_ATTRIBUTE_REUSE_SLOT)
             outPut << "override ";
-        }
     } else if (flags & METHOD_ATTRIBUTE_FINAL) {
-        if ((flags & METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK) == METHOD_ATTRIBUTE_REUSE_SLOT) {
+        if ((flags & METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK) == METHOD_ATTRIBUTE_REUSE_SLOT)
             outPut << "sealed override ";
-        }
     } else if (flags & METHOD_ATTRIBUTE_VIRTUAL) {
-        if ((flags & METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK) == METHOD_ATTRIBUTE_NEW_SLOT) {
+        if ((flags & METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK) == METHOD_ATTRIBUTE_NEW_SLOT)
             outPut << "virtual ";
-        } else {
+        else
             outPut << "override ";
-        }
     }
-    if (flags & METHOD_ATTRIBUTE_PINVOKE_IMPL) {
-        outPut << "extern ";
-    }
+    if (flags & METHOD_ATTRIBUTE_PINVOKE_IMPL) outPut << "extern ";
     return outPut.str();
 }
 
 bool _il2cpp_type_is_byref(const Il2CppType *type) {
     auto byref = type->byref;
-    if (il2cpp_type_is_byref) {
-        byref = il2cpp_type_is_byref(type);
-    }
+    if (il2cpp_type_is_byref) byref = il2cpp_type_is_byref(type);
     return byref;
 }
 
 std::string get_field_default_value(FieldInfo *field, const Il2CppType *field_type) {
     std::stringstream outPut;
-    if (!il2cpp_field_static_get_value) {
-        return outPut.str();
-    }
+    if (!il2cpp_field_static_get_value) return outPut.str();
     uint64_t val = 0;
     il2cpp_field_static_get_value(field, &val);
     switch (field_type->type) {
-        case IL2CPP_TYPE_BOOLEAN:
-            outPut << ((val & 0xff) ? "true" : "false");
-            break;
-        case IL2CPP_TYPE_CHAR:
-            outPut << (uint32_t) (uint16_t) val;
-            break;
-        case IL2CPP_TYPE_I1:
-            outPut << (int32_t) (int8_t) val;
-            break;
-        case IL2CPP_TYPE_U1:
-            outPut << (uint32_t) (uint8_t) val;
-            break;
-        case IL2CPP_TYPE_I2:
-            outPut << (int32_t) (int16_t) val;
-            break;
-        case IL2CPP_TYPE_U2:
-            outPut << (uint32_t) (uint16_t) val;
-            break;
-        case IL2CPP_TYPE_I4:
-            outPut << (int32_t) val;
-            break;
-        case IL2CPP_TYPE_U4:
-            outPut << (uint32_t) val;
-            break;
-        case IL2CPP_TYPE_I8:
-            outPut << (int64_t) val;
-            break;
-        case IL2CPP_TYPE_U8:
-            outPut << val;
-            break;
-        case IL2CPP_TYPE_R4: {
-            float f = 0;
-            memcpy(&f, &val, sizeof(f));
-            outPut << f;
-            break;
-        }
-        case IL2CPP_TYPE_R8: {
-            double d = 0;
-            memcpy(&d, &val, sizeof(d));
-            outPut << d;
-            break;
-        }
+        case IL2CPP_TYPE_BOOLEAN: outPut << ((val & 0xff) ? "true" : "false"); break;
+        case IL2CPP_TYPE_CHAR:    outPut << (uint32_t) (uint16_t) val; break;
+        case IL2CPP_TYPE_I1:      outPut << (int32_t) (int8_t) val; break;
+        case IL2CPP_TYPE_U1:      outPut << (uint32_t) (uint8_t) val; break;
+        case IL2CPP_TYPE_I2:      outPut << (int32_t) (int16_t) val; break;
+        case IL2CPP_TYPE_U2:      outPut << (uint32_t) (uint16_t) val; break;
+        case IL2CPP_TYPE_I4:      outPut << (int32_t) val; break;
+        case IL2CPP_TYPE_U4:      outPut << (uint32_t) val; break;
+        case IL2CPP_TYPE_I8:      outPut << (int64_t) val; break;
+        case IL2CPP_TYPE_U8:      outPut << val; break;
+        case IL2CPP_TYPE_R4: { float f; memcpy(&f, &val, 4); outPut << f; break; }
+        case IL2CPP_TYPE_R8: { double d; memcpy(&d, &val, 8); outPut << d; break; }
         case IL2CPP_TYPE_STRING: {
             auto str = (Il2CppString *) val;
-            if (!str) {
-                outPut << "null";
-            } else if (il2cpp_string_chars && il2cpp_string_length) {
+            if (!str) outPut << "null";
+            else if (il2cpp_string_chars && il2cpp_string_length) {
                 auto chars = il2cpp_string_chars(str);
                 auto len = il2cpp_string_length(str);
                 outPut << "\"";
                 for (int i = 0; i < len; ++i) {
                     Il2CppChar c = chars[i];
-                    switch (c) {
-                        case '\\': outPut << "\\\\"; break;
-                        case '\"': outPut << "\\\""; break;
-                        case '\n': outPut << "\\n"; break;
-                        case '\r': outPut << "\\r"; break;
-                        case '\t': outPut << "\\t"; break;
-                        default:
-                            if (c >= 0x20 && c < 0x7f) {
-                                outPut << (char) c;
-                            } else {
-                                char buf[8];
-                                snprintf(buf, sizeof(buf), "\\u%04x", c);
-                                outPut << buf;
-                            }
-                    }
+                    if (c >= 0x20 && c < 0x7f) outPut << (char) c;
+                    else { char buf[8]; snprintf(buf, 8, "\\u%04x", c); outPut << buf; }
                 }
                 outPut << "\"";
             }
             break;
         }
-        default:
-            break;
+        default: break;
     }
     return outPut.str();
 }
@@ -195,10 +130,8 @@ std::string dump_method(Il2CppClass *klass) {
     void *iter = nullptr;
     while (auto method = il2cpp_class_get_methods(klass, &iter)) {
         if (method->methodPointer) {
-            outPut << "\t// RVA: 0x";
-            outPut << std::hex << (uint64_t) method->methodPointer - il2cpp_base;
-            outPut << " VA: 0x";
-            outPut << std::hex << (uint64_t) method->methodPointer;
+            outPut << "\t// RVA: 0x" << std::hex << (uint64_t) method->methodPointer - il2cpp_base
+                   << " VA: 0x" << std::hex << (uint64_t) method->methodPointer;
         } else {
             outPut << "\t// RVA: 0x VA: 0x0";
         }
@@ -207,40 +140,22 @@ std::string dump_method(Il2CppClass *klass) {
         auto flags = il2cpp_method_get_flags(method, &iflags);
         outPut << get_method_modifier(flags);
         auto return_type = il2cpp_method_get_return_type(method);
-        if (_il2cpp_type_is_byref(return_type)) {
-            outPut << "ref ";
-        }
+        if (_il2cpp_type_is_byref(return_type)) outPut << "ref ";
         auto return_class = il2cpp_class_from_type(return_type);
-        outPut << il2cpp_class_get_name(return_class) << " " << il2cpp_method_get_name(method)
-               << "(";
+        outPut << il2cpp_class_get_name(return_class) << " " << il2cpp_method_get_name(method) << "(";
         auto param_count = il2cpp_method_get_param_count(method);
         for (int i = 0; i < param_count; ++i) {
             auto param = il2cpp_method_get_param(method, i);
             auto attrs = param->attrs;
             if (_il2cpp_type_is_byref(param)) {
-                if (attrs & PARAM_ATTRIBUTE_OUT && !(attrs & PARAM_ATTRIBUTE_IN)) {
-                    outPut << "out ";
-                } else if (attrs & PARAM_ATTRIBUTE_IN && !(attrs & PARAM_ATTRIBUTE_OUT)) {
-                    outPut << "in ";
-                } else {
-                    outPut << "ref ";
-                }
-            } else {
-                if (attrs & PARAM_ATTRIBUTE_IN) {
-                    outPut << "[In] ";
-                }
-                if (attrs & PARAM_ATTRIBUTE_OUT) {
-                    outPut << "[Out] ";
-                }
+                if (attrs & PARAM_ATTRIBUTE_OUT && !(attrs & PARAM_ATTRIBUTE_IN)) outPut << "out ";
+                else if (attrs & PARAM_ATTRIBUTE_IN && !(attrs & PARAM_ATTRIBUTE_OUT)) outPut << "in ";
+                else outPut << "ref ";
             }
             auto parameter_class = il2cpp_class_from_type(param);
-            outPut << il2cpp_class_get_name(parameter_class) << " "
-                   << il2cpp_method_get_param_name(method, i);
-            outPut << ", ";
+            outPut << il2cpp_class_get_name(parameter_class) << " " << il2cpp_method_get_param_name(method, i) << ", ";
         }
-        if (param_count > 0) {
-            outPut.seekp(-2, std::stringstream::cur);
-        }
+        if (param_count > 0) outPut.seekp(-2, std::stringstream::cur);
         outPut << ") { }\n";
     }
     return outPut.str();
@@ -263,22 +178,13 @@ std::string dump_property(Il2CppClass *klass) {
             prop_class = il2cpp_class_from_type(il2cpp_method_get_return_type(get));
         } else if (set) {
             outPut << get_method_modifier(il2cpp_method_get_flags(set, &iflags));
-            auto param = il2cpp_method_get_param(set, 0);
-            prop_class = il2cpp_class_from_type(param);
+            prop_class = il2cpp_class_from_type(il2cpp_method_get_param(set, 0));
         }
         if (prop_class) {
             outPut << il2cpp_class_get_name(prop_class) << " " << prop_name << " { ";
-            if (get) {
-                outPut << "get; ";
-            }
-            if (set) {
-                outPut << "set; ";
-            }
+            if (get) outPut << "get; ";
+            if (set) outPut << "set; ";
             outPut << "}\n";
-        } else {
-            if (prop_name) {
-                outPut << " // unknown property " << prop_name;
-            }
         }
     }
     return outPut.str();
@@ -294,32 +200,17 @@ std::string dump_field(Il2CppClass *klass) {
         auto attrs = il2cpp_field_get_flags(field);
         auto access = attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK;
         switch (access) {
-            case FIELD_ATTRIBUTE_PRIVATE:
-                outPut << "private ";
-                break;
-            case FIELD_ATTRIBUTE_PUBLIC:
-                outPut << "public ";
-                break;
-            case FIELD_ATTRIBUTE_FAMILY:
-                outPut << "protected ";
-                break;
+            case FIELD_ATTRIBUTE_PRIVATE: outPut << "private "; break;
+            case FIELD_ATTRIBUTE_PUBLIC:  outPut << "public "; break;
+            case FIELD_ATTRIBUTE_FAMILY:  outPut << "protected "; break;
             case FIELD_ATTRIBUTE_ASSEMBLY:
-            case FIELD_ATTRIBUTE_FAM_AND_ASSEM:
-                outPut << "internal ";
-                break;
-            case FIELD_ATTRIBUTE_FAM_OR_ASSEM:
-                outPut << "protected internal ";
-                break;
+            case FIELD_ATTRIBUTE_FAM_AND_ASSEM: outPut << "internal "; break;
+            case FIELD_ATTRIBUTE_FAM_OR_ASSEM:  outPut << "protected internal "; break;
         }
-        if (attrs & FIELD_ATTRIBUTE_LITERAL) {
-            outPut << "const ";
-        } else {
-            if (attrs & FIELD_ATTRIBUTE_STATIC) {
-                outPut << "static ";
-            }
-            if (attrs & FIELD_ATTRIBUTE_INIT_ONLY) {
-                outPut << "readonly ";
-            }
+        if (attrs & FIELD_ATTRIBUTE_LITERAL) outPut << "const ";
+        else {
+            if (attrs & FIELD_ATTRIBUTE_STATIC) outPut << "static ";
+            if (attrs & FIELD_ATTRIBUTE_INIT_ONLY) outPut << "readonly ";
         }
         auto field_type = il2cpp_field_get_type(field);
         auto field_class = il2cpp_class_from_type(field_type);
@@ -331,87 +222,11 @@ std::string dump_field(Il2CppClass *klass) {
                 outPut << " = " << std::dec << val;
             } else {
                 auto default_value = get_field_default_value(field, field_type);
-                if (!default_value.empty()) {
-                    outPut << " = " << default_value;
-                }
+                if (!default_value.empty()) outPut << " = " << default_value;
             }
         }
         outPut << "; // 0x" << std::hex << il2cpp_field_get_offset(field) << "\n";
     }
-    return outPut.str();
-}
-
-std::string dump_type(const Il2CppType *type) {
-    std::stringstream outPut;
-    auto *klass = il2cpp_class_from_type(type);
-    outPut << "\n// Namespace: " << il2cpp_class_get_namespace(klass) << "\n";
-    auto flags = il2cpp_class_get_flags(klass);
-    if (flags & TYPE_ATTRIBUTE_SERIALIZABLE) {
-        outPut << "[Serializable]\n";
-    }
-    auto is_valuetype = il2cpp_class_is_valuetype(klass);
-    auto is_enum = il2cpp_class_is_enum(klass);
-    auto visibility = flags & TYPE_ATTRIBUTE_VISIBILITY_MASK;
-    switch (visibility) {
-        case TYPE_ATTRIBUTE_PUBLIC:
-        case TYPE_ATTRIBUTE_NESTED_PUBLIC:
-            outPut << "public ";
-            break;
-        case TYPE_ATTRIBUTE_NOT_PUBLIC:
-        case TYPE_ATTRIBUTE_NESTED_FAM_AND_ASSEM:
-        case TYPE_ATTRIBUTE_NESTED_ASSEMBLY:
-            outPut << "internal ";
-            break;
-        case TYPE_ATTRIBUTE_NESTED_PRIVATE:
-            outPut << "private ";
-            break;
-        case TYPE_ATTRIBUTE_NESTED_FAMILY:
-            outPut << "protected ";
-            break;
-        case TYPE_ATTRIBUTE_NESTED_FAM_OR_ASSEM:
-            outPut << "protected internal ";
-            break;
-    }
-    if (flags & TYPE_ATTRIBUTE_ABSTRACT && flags & TYPE_ATTRIBUTE_SEALED) {
-        outPut << "static ";
-    } else if (!(flags & TYPE_ATTRIBUTE_INTERFACE) && flags & TYPE_ATTRIBUTE_ABSTRACT) {
-        outPut << "abstract ";
-    } else if (!is_valuetype && !is_enum && flags & TYPE_ATTRIBUTE_SEALED) {
-        outPut << "sealed ";
-    }
-    if (flags & TYPE_ATTRIBUTE_INTERFACE) {
-        outPut << "interface ";
-    } else if (is_enum) {
-        outPut << "enum ";
-    } else if (is_valuetype) {
-        outPut << "struct ";
-    } else {
-        outPut << "class ";
-    }
-    outPut << il2cpp_class_get_name(klass);
-    std::vector<std::string> extends;
-    auto parent = il2cpp_class_get_parent(klass);
-    if (!is_valuetype && !is_enum && parent) {
-        auto parent_type = il2cpp_class_get_type(parent);
-        if (parent_type->type != IL2CPP_TYPE_OBJECT) {
-            extends.emplace_back(il2cpp_class_get_name(parent));
-        }
-    }
-    void *iter = nullptr;
-    while (auto itf = il2cpp_class_get_interfaces(klass, &iter)) {
-        extends.emplace_back(il2cpp_class_get_name(itf));
-    }
-    if (!extends.empty()) {
-        outPut << " : " << extends[0];
-        for (int i = 1; i < extends.size(); ++i) {
-            outPut << ", " << extends[i];
-        }
-    }
-    outPut << "\n{";
-    outPut << dump_field(klass);
-    outPut << dump_property(klass);
-    outPut << dump_method(klass);
-    outPut << "}\n";
     return outPut.str();
 }
 
@@ -420,9 +235,8 @@ void il2cpp_api_init(void *handle) {
     g_il2cpp_handle = handle;
     init_il2cpp_api(handle);
     xdl_info_t xinfo{};
-    if (xdl_info(handle, XDL_DI_DLINFO, &xinfo) == 0 && xinfo.dli_fbase) {
+    if (xdl_info(handle, XDL_DI_DLINFO, &xinfo) == 0 && xinfo.dli_fbase)
         il2cpp_base = reinterpret_cast<uint64_t>(xinfo.dli_fbase);
-    }
     LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
 }
 
@@ -433,9 +247,7 @@ static struct sigaction g_old_segv{};
 static struct sigaction g_old_bus{};
 
 static void dump_fault_handler(int sig, siginfo_t *info, void *ucontext) {
-    if (g_dump_guard_active && gettid() == g_dump_tid) {
-        siglongjmp(g_dump_jmp, sig);
-    }
+    if (g_dump_guard_active && gettid() == g_dump_tid) siglongjmp(g_dump_jmp, sig);
     struct sigaction *old = (sig == SIGBUS) ? &g_old_bus : &g_old_segv;
     if (old->sa_flags & SA_SIGINFO) {
         if (old->sa_sigaction) old->sa_sigaction(sig, info, ucontext);
@@ -467,15 +279,13 @@ void dump_il2cpp_so(const char *outDir) {
     struct Seg { uint64_t start, end; };
     std::vector<Seg> segs;
     uint64_t base = UINT64_MAX, hi = 0;
-
     FILE *fp = fopen("/proc/self/maps", "r");
     if (!fp) { LOGE("cannot open maps"); return; }
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
         uint64_t s = 0, e = 0;
         char perms[8] = {0}, path[512] = {0};
-        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %*s %*s %*s %511s",
-                   &s, &e, perms, path) != 4) continue;
+        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %*s %*s %*s %511s", &s, &e, perms, path) != 4) continue;
         if (!strstr(path, "libil2cpp.so")) continue;
         if (perms[0] != 'r') continue;
         if (s < base) base = s;
@@ -483,31 +293,17 @@ void dump_il2cpp_so(const char *outDir) {
         segs.push_back({s, e});
     }
     fclose(fp);
-
-    if (segs.empty() || base == UINT64_MAX) {
-        LOGE("libil2cpp.so not found in maps");
-        return;
-    }
-
+    if (segs.empty() || base == UINT64_MAX) return;
     uint64_t total = hi - base;
-    LOGI("libil2cpp.so base=0x%" PRIx64 " hi=0x%" PRIx64 " size=%" PRIu64,
-         base, hi, total);
-
+    LOGI("libil2cpp.so base=0x%" PRIx64 " hi=0x%" PRIx64 " size=%" PRIu64, base, hi, total);
     uint8_t *buf = (uint8_t *)calloc(1, total);
-    if (!buf) { LOGE("calloc %" PRIu64 " failed", total); return; }
-
+    if (!buf) return;
     for (auto &sg : segs) {
         uint64_t off = sg.start - base;
         uint64_t len = sg.end - sg.start;
         if (off + len > total) continue;
-        if (sigsetjmp(g_dump_jmp, 1) == 0) {
-            memcpy(buf + off, (void *)sg.start, len);
-        } else {
-            LOGW("segment 0x%" PRIx64 "-0x%" PRIx64 " faulted, zero-filled",
-                 sg.start, sg.end);
-        }
+        if (sigsetjmp(g_dump_jmp, 1) == 0) memcpy(buf + off, (void *)sg.start, len);
     }
-
     char path[512];
     snprintf(path, sizeof(path), "%s/files/libil2cpp_dump.so", outDir);
     FILE *out = fopen(path, "wb");
@@ -517,6 +313,199 @@ void dump_il2cpp_so(const char *outDir) {
         LOGI("dumped libil2cpp.so %zu bytes -> %s", w, path);
     }
     free(buf);
+}
+
+// ===========================================================================
+// inline hook (ARM64) + spec 驱动
+// ===========================================================================
+
+enum SpecType {
+    T_I8 = 0, T_U8, T_I16, T_U16, T_I32, T_U32, T_I64, T_U64, T_F32, T_F64, T_PTR
+};
+
+struct SpecItem {
+    uint8_t src;    // 0=this, 1=a0, 2=a1, 3=a2, 4=a3
+    int32_t off;
+    uint8_t type;
+};
+
+struct HookRecord {
+    uint64_t vals[8];
+};
+
+struct HookSlot {
+    uint64_t target;
+    uint8_t  saved[16];
+    char     name[64];
+    char     spec[128];
+    volatile int  hit_count;
+    volatile bool active;
+    volatile uint32_t write_idx;
+    pthread_mutex_t lock;
+
+    int      field_count;
+    SpecItem fields[8];
+    HookRecord records[256];
+};
+
+static HookSlot g_hooks[4] = {};
+
+static void hook_generic(int idx, void* a0, void* a1, void* a2, void* a3);
+
+#define DEFINE_ENTRY(N) \
+extern "C" void hook_entry_##N(void* a0, void* a1, void* a2, void* a3) { \
+    hook_generic(N, a0, a1, a2, a3); \
+}
+DEFINE_ENTRY(0)
+DEFINE_ENTRY(1)
+DEFINE_ENTRY(2)
+DEFINE_ENTRY(3)
+#undef DEFINE_ENTRY
+
+static void* g_entry_table[4] = {
+    (void*)hook_entry_0, (void*)hook_entry_1,
+    (void*)hook_entry_2, (void*)hook_entry_3,
+};
+
+// 16 字节跳转: LDR X17, #8 ; BR X17 ; <8-byte target>
+static void write_jump(uint64_t target, uint64_t entry) {
+    uint8_t code[16];
+    uint32_t ldr = 0x58000051;
+    uint32_t br  = 0xD61F0220;
+    memcpy(code, &ldr, 4);
+    memcpy(code + 4, &br, 4);
+    memcpy(code + 8, &entry, 8);
+    uint64_t page = target & ~0xFFFULL;
+    mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    memcpy((void*)target, code, 16);
+    __builtin___clear_cache((void*)target, (void*)(target + 16));
+}
+
+static bool parse_spec(HookSlot& h, const char* spec) {
+    h.field_count = 0;
+    char buf[128];
+    strncpy(buf, spec, 127); buf[127] = 0;
+    char* saveptr = nullptr;
+    char* tok = strtok_r(buf, ",", &saveptr);
+    while (tok && h.field_count < 8) {
+        while (*tok == ' ') tok++;
+        SpecItem& it = h.fields[h.field_count];
+        it.type = T_I64;
+        it.off = 0;
+        it.src = 0;
+
+        char expr[64];
+        char* colon = strrchr(tok, ':');
+        if (colon) {
+            *colon = 0;
+            const char* t = colon + 1;
+            if      (!strcmp(t,"i8"))  it.type=T_I8;
+            else if (!strcmp(t,"u8"))  it.type=T_U8;
+            else if (!strcmp(t,"i16")) it.type=T_I16;
+            else if (!strcmp(t,"u16")) it.type=T_U16;
+            else if (!strcmp(t,"i32")) it.type=T_I32;
+            else if (!strcmp(t,"u32")) it.type=T_U32;
+            else if (!strcmp(t,"i64")) it.type=T_I64;
+            else if (!strcmp(t,"u64")) it.type=T_U64;
+            else if (!strcmp(t,"f32")) it.type=T_F32;
+            else if (!strcmp(t,"f64")) it.type=T_F64;
+            else if (!strcmp(t,"ptr")) it.type=T_PTR;
+        }
+        strncpy(expr, tok, 63); expr[63]=0;
+
+        char* plus = strchr(expr, '+');
+        if (plus) { *plus = 0; it.off = (int32_t)strtol(plus+1, nullptr, 0); }
+
+        if      (!strcmp(expr,"this")) it.src = 0;
+        else if (!strcmp(expr,"a0"))   it.src = 1;
+        else if (!strcmp(expr,"a1"))   it.src = 2;
+        else if (!strcmp(expr,"a2"))   it.src = 3;
+        else if (!strcmp(expr,"a3"))   it.src = 4;
+        else return false;
+
+        h.field_count++;
+        tok = strtok_r(nullptr, ",", &saveptr);
+    }
+    return h.field_count > 0;
+}
+
+static void read_field(uint64_t addr, const SpecItem& it, uint64_t* out) {
+    switch (it.type) {
+        case T_I8:  { int8_t  v; memcpy(&v,(void*)addr,1); *out=(uint64_t)(int64_t)v; break; }
+        case T_U8:  { uint8_t v; memcpy(&v,(void*)addr,1); *out=v; break; }
+        case T_I16: { int16_t v; memcpy(&v,(void*)addr,2); *out=(uint64_t)(int64_t)v; break; }
+        case T_U16: { uint16_t v;memcpy(&v,(void*)addr,2); *out=v; break; }
+        case T_I32: { int32_t v; memcpy(&v,(void*)addr,4); *out=(uint64_t)(int64_t)v; break; }
+        case T_U32: { uint32_t v;memcpy(&v,(void*)addr,4); *out=v; break; }
+        case T_I64:
+        case T_U64:
+        case T_PTR: { uint64_t v; memcpy(&v,(void*)addr,8); *out=v; break; }
+        case T_F32: { float v; memcpy(&v,(void*)addr,4); uint32_t u; memcpy(&u,&v,4); *out=u; break; }
+        case T_F64: { double v; memcpy(&v,(void*)addr,8); uint64_t u; memcpy(&u,&v,8); *out=u; break; }
+    }
+}
+
+static void hook_generic(int idx, void* a0, void* a1, void* a2, void* a3) {
+    HookSlot& h = g_hooks[idx];
+
+    // 抓帧
+    uint32_t wi = h.write_idx;
+    HookRecord& rec = h.records[wi & 0xFF];
+    uint64_t args[5] = { (uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, 0 };
+    for (int i = 0; i < h.field_count; ++i) {
+        SpecItem& it = h.fields[i];
+        uint64_t base = (it.src == 0) ? (uint64_t)a0 : args[it.src];
+        uint64_t v = 0;
+        if (sigsetjmp(g_dump_jmp, 1) == 0) read_field(base + it.off, it, &v);
+        rec.vals[i] = v;
+    }
+    h.write_idx = wi + 1;
+    __atomic_add_fetch((int*)&h.hit_count, 1, __ATOMIC_RELAXED);
+
+    // 恢复原码 → 调原函数 → 重打 patch
+    pthread_mutex_lock(&h.lock);
+    uint64_t t = h.target;
+    uint64_t page = t & ~0xFFFULL;
+    mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    memcpy((void*)t, h.saved, 16);
+    __builtin___clear_cache((void*)t, (void*)(t + 16));
+    ((void(*)(void*,void*,void*,void*))t)(a0, a1, a2, a3);
+    write_jump(t, (uint64_t)g_entry_table[idx]);
+    pthread_mutex_unlock(&h.lock);
+}
+
+static int hook_install_ex(uint64_t target, const char* name, const char* spec) {
+    for (int i = 0; i < 4; ++i) {
+        if (g_hooks[i].active) continue;
+        HookSlot& h = g_hooks[i];
+        uint64_t page = target & ~0xFFFULL;
+        if (mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+            return -2;
+        memcpy(h.saved, (void*)target, 16);
+        h.target = target;
+        snprintf(h.name, sizeof(h.name), "%s", name ? name : "?");
+        snprintf(h.spec, sizeof(h.spec), "%s", spec ? spec : "this:i64");
+        if (!parse_spec(h, spec ? spec : "this:i64")) return -3;
+        h.hit_count = 0;
+        h.write_idx = 0;
+        pthread_mutex_init(&h.lock, nullptr);
+        write_jump(target, (uint64_t)g_entry_table[i]);
+        h.active = true;
+        return i;
+    }
+    return -1;
+}
+
+static int hook_remove(int idx) {
+    if (idx < 0 || idx >= 4) return -1;
+    HookSlot& h = g_hooks[idx];
+    if (!h.active) return -1;
+    uint64_t page = h.target & ~0xFFFULL;
+    mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    memcpy((void*)h.target, h.saved, 16);
+    __builtin___clear_cache((void*)h.target, (void*)(h.target + 16));
+    h.active = false;
+    return 0;
 }
 
 // ===========================================================================
@@ -571,7 +560,6 @@ static void rpc_dump_class(FILE *out, void *klass) {
     const char *ns   = g_rpc_api.class_get_namespace(klass);
     const char *name = g_rpc_api.class_get_name(klass);
     fprintf(out, "=== class %s.%s ===\n", ns ? ns : "", name ? name : "?");
-
     void *fiter = nullptr;
     while (auto field = g_rpc_api.class_get_fields(klass, &fiter)) {
         void *fieldType = g_rpc_api.field_get_type(field);
@@ -590,7 +578,6 @@ static void rpc_dump_class(FILE *out, void *klass) {
     }
 }
 
-// 打印类的方法 (VA/RVA + 签名)
 static void rpc_dump_methods(FILE *out, const char *cls) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) { fprintf(out, "ERR: no domain\n"); return; }
@@ -600,8 +587,7 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
     for (size_t i = 0; i < asmCount; ++i) {
         void *image = g_rpc_api.assembly_get_image(assemblies[i]);
         if (!image) continue;
-        const char *imageName = g_rpc_api.image_get_name
-                              ? g_rpc_api.image_get_name(image) : "?";
+        const char *imageName = g_rpc_api.image_get_name ? g_rpc_api.image_get_name(image) : "?";
         size_t classCount = g_rpc_api.image_get_class_count(image);
         for (size_t j = 0; j < classCount; ++j) {
             void *klass_v = g_rpc_api.image_get_class(image, j);
@@ -613,10 +599,8 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
             char full[512];
             snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name);
             if (strcmp(full, cls) != 0 && strcmp(name, cls) != 0) continue;
-
             found++;
             fprintf(out, "\n=== %s (image=%s) ===\n", full, imageName ? imageName : "?");
-
             void *iter = nullptr;
             while (auto method = il2cpp_class_get_methods(klass, &iter)) {
                 if (!method) continue;
@@ -626,7 +610,6 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
                 uint32_t pc = il2cpp_method_get_param_count(method);
                 uint64_t va = (uint64_t)method->methodPointer;
                 uint64_t rva = va ? va - il2cpp_base : 0;
-
                 fprintf(out, "  VA=0x%016" PRIx64 " RVA=0x%08" PRIx64 " %s%s(",
                         va, rva,
                         (mflags & METHOD_ATTRIBUTE_STATIC) ? "static " : "",
@@ -634,8 +617,7 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
                 for (uint32_t p = 0; p < pc; ++p) {
                     auto param = il2cpp_method_get_param(method, p);
                     auto pclass = il2cpp_class_from_type(param);
-                    fprintf(out, "%s%s", p ? ", " : "",
-                            pclass ? il2cpp_class_get_name(pclass) : "?");
+                    fprintf(out, "%s%s", p ? ", " : "", pclass ? il2cpp_class_get_name(pclass) : "?");
                 }
                 fprintf(out, ")\n");
             }
@@ -644,41 +626,32 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
     fprintf(out, "\n--- found %d ---\n", found);
 }
 
-static int rpc_scan(FILE *out, const char *imagePattern,
-                    const char *classPattern, bool dumpAllInMatchedImage) {
+static int rpc_scan(FILE *out, const char *imagePattern, const char *classPattern, bool dumpAllInMatchedImage) {
     void *domain = g_rpc_api.domain_get();
-    if (!domain) { fprintf(out, "ERR: domain_get failed\n"); return -1; }
-
+    if (!domain) return -1;
     size_t asmCount = 0;
     void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
-    if (!assemblies) { fprintf(out, "ERR: dga failed\n"); return -1; }
+    if (!assemblies) return -1;
     fprintf(out, "assemblies count = %zu\n", asmCount);
-
     int hits = 0;
     for (size_t i = 0; i < asmCount; ++i) {
         void *image = g_rpc_api.assembly_get_image(assemblies[i]);
         if (!image) continue;
-
-        const char *imageName = g_rpc_api.image_get_name
-                              ? g_rpc_api.image_get_name(image) : "?";
+        const char *imageName = g_rpc_api.image_get_name ? g_rpc_api.image_get_name(image) : "?";
         if (!imageName) imageName = "?";
-
         bool imageMatched = imagePattern && strstr(imageName, imagePattern);
         bool dumpAll = dumpAllInMatchedImage && imageMatched;
         if (imagePattern && !imageMatched && !classPattern) continue;
-
         size_t classCount = g_rpc_api.image_get_class_count(image);
         for (size_t j = 0; j < classCount; ++j) {
             void *klass = g_rpc_api.image_get_class(image, j);
             if (!klass) continue;
             const char *name = g_rpc_api.class_get_name(klass);
             if (!name) continue;
-
             bool hit = dumpAll;
             if (!hit && classPattern) hit = strstr(name, classPattern) != nullptr;
             if (!hit && imagePattern) hit = imageMatched;
             if (!hit) continue;
-
             ++hits;
             fprintf(out, "\n[image=%s]\n", imageName);
             rpc_dump_class(out, klass);
@@ -718,9 +691,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
     }
     else if (strncmp(cmd, "dumpimage ", 10) == 0) {
         char img[128] = {0};
-        if (sscanf(cmd + 10, "%127s", img) == 1) {
-            rpc_scan(out, img, nullptr, true);
-        }
+        if (sscanf(cmd + 10, "%127s", img) == 1) rpc_scan(out, img, nullptr, true);
     }
     else if (strncmp(cmd, "class ", 6) == 0) {
         char cls[256] = {0};
@@ -752,10 +723,83 @@ static void rpc_handle(const char *cmd, FILE *out) {
     }
     else if (strncmp(cmd, "methods ", 8) == 0) {
         char cls[256] = {0};
-        if (sscanf(cmd + 8, "%255s", cls) == 1) {
-            rpc_dump_methods(out, cls);
+        if (sscanf(cmd + 8, "%255s", cls) == 1) rpc_dump_methods(out, cls);
+        else fprintf(out, "ERR: usage: methods <ClassName>\n");
+    }
+    else if (strncmp(cmd, "hook ", 5) == 0) {
+        uint64_t addr = 0;
+        char rest[256] = {0};
+        if (sscanf(cmd + 5, "%" SCNx64 " %255[^\n]", &addr, rest) >= 1) {
+            char name[64] = {0};
+            char spec[128] = {0};
+            char* sp = rest;
+            while (*sp == ' ') sp++;
+            char* sep = strchr(sp, ' ');
+            if (sep) {
+                *sep = 0;
+                strncpy(name, sp, 63);
+                strncpy(spec, sep + 1, 127);
+            } else {
+                strncpy(name, sp, 63);
+                strcpy(spec, "this:i64");
+            }
+            int idx = hook_install_ex(addr, name, spec);
+            if (idx >= 0)
+                fprintf(out, "hook installed: slot=%d addr=0x%" PRIx64 " spec=%s\n", idx, addr, spec);
+            else
+                fprintf(out, "hook failed: %d\n", idx);
         } else {
-            fprintf(out, "ERR: usage: methods <ClassName>\n");
+            fprintf(out, "ERR: usage: hook <addr> [name] [spec]\n");
+        }
+    }
+    else if (strncmp(cmd, "unhook ", 7) == 0) {
+        int idx = -1;
+        if (sscanf(cmd + 7, "%d", &idx) == 1) {
+            int r = hook_remove(idx);
+            fprintf(out, "unhook slot=%d result=%d\n", idx, r);
+        }
+    }
+    else if (strcmp(cmd, "unhookall") == 0) {
+        for (int i = 0; i < 4; ++i) if (g_hooks[i].active) hook_remove(i);
+        fprintf(out, "all unhooked\n");
+    }
+    else if (strncmp(cmd, "hits", 4) == 0 && (cmd[4] == 0 || cmd[4] == ' ')) {
+        int slot = -1, n = 20;
+        if (strlen(cmd) > 5) sscanf(cmd + 5, "%d %d", &slot, &n);
+        if (slot < 0 || slot >= 4 || !g_hooks[slot].active) {
+            fprintf(out, "ERR: no such hook (usage: hits <slot> [n])\n");
+        } else {
+            HookSlot& h = g_hooks[slot];
+            uint32_t total = h.hit_count;
+            uint32_t cnt = (n > 0 && (uint32_t)n < total) ? n : total;
+            if (cnt > 256) cnt = 256;
+            uint32_t end = h.write_idx;
+            uint32_t start = end - cnt;
+            fprintf(out, "[%d] %s hits=%u shown=%u spec=%s\n",
+                    slot, h.name, total, cnt, h.spec);
+            for (uint32_t k = 0; k < cnt; ++k) {
+                HookRecord& rec = h.records[(start + k) & 0xFF];
+                fprintf(out, "  #%u:", start + k);
+                for (int i = 0; i < h.field_count; ++i) {
+                    SpecItem& it = h.fields[i];
+                    uint64_t v = rec.vals[i];
+                    fprintf(out, " ");
+                    switch (it.type) {
+                        case T_I8:  fprintf(out, "%d", (int)(int8_t)v); break;
+                        case T_U8:  fprintf(out, "%u", (unsigned)(uint8_t)v); break;
+                        case T_I16: fprintf(out, "%d", (int)(int16_t)v); break;
+                        case T_U16: fprintf(out, "%u", (unsigned)(uint16_t)v); break;
+                        case T_I32: fprintf(out, "%d", (int)(int32_t)v); break;
+                        case T_U32: fprintf(out, "%u", (unsigned)(uint32_t)v); break;
+                        case T_I64: fprintf(out, "%" PRId64, (int64_t)v); break;
+                        case T_U64:
+                        case T_PTR: fprintf(out, "0x%" PRIx64, v); break;
+                        case T_F32: { float f; memcpy(&f,&v,4); fprintf(out, "%g", f); break; }
+                        case T_F64: { double d; memcpy(&d,&v,8); fprintf(out, "%g", d); break; }
+                    }
+                }
+                fprintf(out, "\n");
+            }
         }
     }
     else if (strncmp(cmd, "read ", 5) == 0) {
@@ -764,8 +808,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
             uint8_t *p = (uint8_t *)addr;
             for (int i = 0; i < size; i += 16) {
                 fprintf(out, "%016" PRIx64 "  ", addr + i);
-                for (int k = 0; k < 16 && i + k < size; ++k)
-                    fprintf(out, "%02x ", p[i + k]);
+                for (int k = 0; k < 16 && i + k < size; ++k) fprintf(out, "%02x ", p[i + k]);
                 fprintf(out, " |");
                 for (int k = 0; k < 16 && i + k < size; ++k) {
                     char c = p[i + k];
@@ -773,15 +816,13 @@ static void rpc_handle(const char *cmd, FILE *out) {
                 }
                 fprintf(out, "|\n");
             }
-        } else {
-            fprintf(out, "ERR: usage: read <addr_hex> <size>\n");
-        }
+        } else fprintf(out, "ERR: usage: read <addr_hex> <size>\n");
     }
     else if (strncmp(cmd, "write ", 6) == 0) {
         uint64_t addr = 0; char hex[1024] = {0};
         if (sscanf(cmd + 6, "%" SCNx64 " %1023s", &addr, hex) == 2) {
             size_t hlen = strlen(hex);
-            if (hlen % 2 != 0) { fprintf(out, "ERR: hex len odd\n"); }
+            if (hlen % 2 != 0) fprintf(out, "ERR: hex len odd\n");
             else {
                 uint8_t *p = (uint8_t *)addr;
                 for (size_t i = 0; i < hlen; i += 2) {
@@ -790,8 +831,6 @@ static void rpc_handle(const char *cmd, FILE *out) {
                 }
                 fprintf(out, "ok, wrote %zu bytes\n", hlen / 2);
             }
-        } else {
-            fprintf(out, "ERR: usage: write <addr_hex> <hex>\n");
         }
     }
     else if (strncmp(cmd, "readf ", 6) == 0) {
@@ -810,10 +849,14 @@ static void rpc_handle(const char *cmd, FILE *out) {
     }
     else {
         fprintf(out, "ERR: unknown cmd\n");
-        fprintf(out, "cmds: ping | base | images | scan <img> <cls> | "
-                     "dumpimage <img> | class <name> | methods <name> | "
-                     "read <addr> <sz> | write <addr> <hex> | "
-                     "readf <addr> | readi <addr>\n");
+        fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
+                     "      class <name> | methods <name>\n"
+                     "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
+                     "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
+                     "spec: src[:type][,src[:type]]*\n"
+                     "  src  = this | a0 | a1 | a2 | a3 (支持 +offset, 如 this+0x28)\n"
+                     "  type = i8|u8|i16|u16|i32|u32|i64|u64|f32|f64|ptr (默认 i64)\n"
+                     "例: hook 0x7a879894c DamageSystem.Run this:i64,this+0x28:ptr,this+0x68:ptr\n");
     }
 }
 
@@ -826,11 +869,9 @@ static void* rpc_server_thread(void*) {
     LOGI("rpc: api resolved, starting server");
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) { LOGE("rpc: socket failed %s", strerror(errno)); return nullptr; }
-
+    if (srv < 0) return nullptr;
     int opt = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -847,7 +888,6 @@ static void* rpc_server_thread(void*) {
         int cli = accept(srv, nullptr, nullptr);
         if (cli < 0) { usleep(100000); continue; }
         LOGI("rpc: client connected");
-
         char line[512];
         while (true) {
             int n = 0;
@@ -860,19 +900,13 @@ static void* rpc_server_thread(void*) {
             }
             line[n] = 0;
             if (n == 0) continue;
-
             char *buf = nullptr;
             size_t buflen = 0;
             FILE *out = open_memstream(&buf, &buflen);
-            if (!out) { goto cli_done; }
-
+            if (!out) goto cli_done;
             rpc_handle(line, out);
             fclose(out);
-
-            if (buf) {
-                write(cli, buf, buflen);
-                free(buf);
-            }
+            if (buf) { write(cli, buf, buflen); free(buf); }
             char eof = 0x04;
             write(cli, &eof, 1);
         }
@@ -887,7 +921,6 @@ static void* rpc_server_thread(void*) {
 
 void il2cpp_dump(const char *outDir) {
     LOGI("memory scan dump start");
-
     install_dump_guard();
     g_dump_guard_active = 1;
 
@@ -902,11 +935,10 @@ void il2cpp_dump(const char *outDir) {
 
     for (int attempt = 1; attempt <= 60; ++attempt) {
         sleep(1);
-
         struct Region { uint64_t start; uint64_t end; };
         std::vector<Region> regions;
         FILE *fp = fopen("/proc/self/maps", "r");
-        if (!fp) { LOGE("cannot open maps"); break; }
+        if (!fp) break;
         char line[1024];
         while (fgets(line, sizeof(line), fp)) {
             uint64_t s = 0, e = 0;
@@ -921,45 +953,32 @@ void il2cpp_dump(const char *outDir) {
         fclose(fp);
 
         for (auto &r : regions) {
-            if (sigsetjmp(g_dump_jmp, 1) != 0) {
-                LOGW("region %" PRIx64 "-%" PRIx64 " faulted, skip", r.start, r.end);
-                continue;
-            }
-
+            if (sigsetjmp(g_dump_jmp, 1) != 0) continue;
             uint8_t *base = (uint8_t *)r.start;
             uint64_t sz = r.end - r.start;
 
             for (uint64_t off = 0; off + 16 < sz; off += 4) {
                 if (base[off] != 0xAF) continue;
                 if (memcmp(base + off, MAGIC, 4) != 0) continue;
-
                 uint32_t version = 0;
                 memcpy(&version, base + off + 4, 4);
                 if (version < 20 || version > 31) continue;
-
                 int32_t sl = 0;
                 memcpy(&sl, base + off + 8, 4);
                 if (sl < 0 || sl > 0x200000) continue;
 
-                LOGI("HIT @ %" PRIx64 " ver=%u sl=0x%x (try %d)",
-                     r.start + off, version, sl, attempt);
+                LOGI("HIT @ %" PRIx64 " ver=%u sl=0x%x (try %d)", r.start + off, version, sl, attempt);
 
                 uint64_t remaining = sz - off;
-                uint64_t dumpSize = remaining > (128ull * 1024 * 1024)
-                                    ? (128ull * 1024 * 1024) : remaining;
-
-                if (sigsetjmp(g_dump_jmp, 1) != 0) {
-                    LOGW("faulted while writing, skip");
-                    continue;
-                }
+                uint64_t dumpSize = remaining > (128ull * 1024 * 1024) ? (128ull * 1024 * 1024) : remaining;
+                if (sigsetjmp(g_dump_jmp, 1) != 0) continue;
                 FILE *out = fopen(path, "wb");
-                if (!out) { LOGE("fopen fail"); continue; }
+                if (!out) continue;
                 size_t w = fwrite(base + off, 1, dumpSize, out);
                 fclose(out);
                 LOGI("dumped %zu bytes -> %s", w, path);
 
                 dump_il2cpp_so(outDir);
-
                 g_dump_guard_active = 0;
                 remove_dump_guard();
 
@@ -968,19 +987,13 @@ void il2cpp_dump(const char *outDir) {
                     if (pthread_create(&th, nullptr, rpc_server_thread, nullptr) == 0) {
                         pthread_detach(th);
                         LOGI("rpc server thread started");
-                    } else {
-                        LOGE("failed to create rpc server thread");
                     }
-                } else {
-                    LOGE("g_il2cpp_handle is null, skip rpc server");
                 }
-
                 return;
             }
         }
         LOGI("attempt %d: %zu regions, no hit", attempt, regions.size());
     }
-
     g_dump_guard_active = 0;
     remove_dump_guard();
     LOGI("no metadata found");

@@ -424,7 +424,6 @@ std::string dump_type(const Il2CppType *type) {
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
-    // Base from the module load address; fall back to dladdr on an export.
     xdl_info_t xinfo{};
     if (xdl_info(handle, XDL_DI_DLINFO, &xinfo) == 0 && xinfo.dli_fbase) {
         il2cpp_base = reinterpret_cast<uint64_t>(xinfo.dli_fbase);
@@ -434,28 +433,8 @@ void il2cpp_api_init(void *handle) {
             il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
         }
     }
-       LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    // Wait for the runtime readiness via il2cpp_domain_get.
-    // NOTE: Do NOT call il2cpp_is_vm_thread(nullptr) — Unity 6000 dereferences
-    // the argument without a null check, causing a SIGSEGV crash at fault addr 0x10.
-    if (il2cpp_domain_get) {
-        for (int i = 0; i < 120 && !il2cpp_domain_get(); ++i) {
-            LOGI("Waiting for il2cpp_init...");
-            sleep(1);
-        }
-    } else {
-        LOGW("il2cpp_domain_get missing; skipping runtime wait");
-    }
-    if (il2cpp_domain_get && il2cpp_thread_attach) {
-        auto domain = il2cpp_domain_get();
-        if (domain) {
-            il2cpp_thread_attach(domain);
-        } else {
-            LOGW("il2cpp_domain_get returned null; skipping thread_attach");
-        }
-    } else {
-        LOGW("domain_get/thread_attach missing; skipping thread_attach");
-    }
+    LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
+    // Unity 6000: skip runtime wait and thread attach — both crash before il2cpp is ready.
 }
 
 // Scoped SIGSEGV/SIGBUS guard: skip decoy classes whose malformed metadata

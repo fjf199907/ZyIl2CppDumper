@@ -479,128 +479,37 @@ static void remove_dump_guard() {
 // ---------------------------------------------------------------------------
 
 void il2cpp_dump(const char *outDir) {
-    LOGI("dumping...");
-    // 等待 il2cpp 运行时完全初始化
-    if (il2cpp_domain_get) {
-        for (int i = 0; i < 120; ++i) {
-            auto domain = il2cpp_domain_get();
-            if (domain) {
-                LOGI("il2cpp_domain_get returned non-null, proceeding to dump");
-                break;
-            }
-            LOGI("Waiting for il2cpp_init...");
-            sleep(1);
-        }
-    } else {
-        LOGW("il2cpp_domain_get missing; cannot wait");
-    }
-    // Bail if the essential walk APIs are missing, rather than null-calling.
-    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies ||
-        !il2cpp_assembly_get_image || !il2cpp_image_get_name) {
-        LOGE("essential il2cpp api missing; cannot dump");
-        return;
-    }
-    size_t size = 0;
-    auto domain = il2cpp_domain_get();
-    if (!domain) {
-        LOGE("il2cpp_domain_get returned null; cannot dump");
-        return;
-    }
-    auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
-    if (!assemblies || size == 0) {
-        LOGE("no assemblies (assemblies=%p size=%zu); cannot dump", (void *) assemblies, size);
-        return;
-    }
-    auto outPath = std::string(outDir).append("/files/dump.cs");
-    std::ofstream outStream(outPath);
-    if (!outStream) {
-        LOGE("failed to open dump file: %s", outPath.data());
-        return;
-    }
-    for (int i = 0; i < size; ++i) {
-        auto image = il2cpp_assembly_get_image(assemblies[i]);
-        outStream << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
-    }
-    if (il2cpp_image_get_class) {
-        LOGI("Version greater than 2018.3");
-        install_dump_guard();
-        int skipped = 0;
-        //使用il2cpp_image_get_class
-        for (int i = 0; i < size; ++i) {
-            auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::string dllHeader = std::string("\n// Dll : ") + il2cpp_image_get_name(image);
-            auto classCount = il2cpp_image_get_class_count(image);
-            for (int j = 0; j < classCount; ++j) {
-                // Guard each class; a faulting decoy is skipped, not fatal.
-                g_dump_guard_active = 1;
-                if (sigsetjmp(g_dump_jmp, 1) == 0) {
-                    auto klass = il2cpp_image_get_class(image, j);
-                    if (!klass) {
-                        ++skipped;
-                    } else {
-                        auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
-                        if (!type) {
-                            ++skipped;
-                        } else {
-                            //LOGD("type name : %s", il2cpp_type_get_name(type));
-                            outStream << dllHeader << dump_type(type);
-                        }
+    LOGI("memory scan dump start");
+    sleep(15);  // 等游戏初始化
+
+    // 遍历 /proc/self/maps，找 r-- 可读段
+    FILE *fp = fopen("/proc/self/maps", "r");
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        uint64_t start, end;
+        char perms[8];
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) continue;
+        if (strncmp(perms, "r--", 3) != 0) continue;
+
+        for (uint64_t addr = start; addr < end - 0x100; addr += 0x1000) {
+            uint32_t *p = (uint32_t *)addr;
+            if (p[0] == 0xFAB11BAF) {  // metadata magic
+                // 前 8 字节后跟文件大小
+                uint32_t size = p[2];
+                if (size > 1024 && size < 100 * 1024 * 1024) {
+                    LOGI("metadata found @ %lx size=%u", addr, size);
+                    char path[256];
+                    snprintf(path, sizeof(path), "%s/files/global-metadata.dat", outDir);
+                    FILE *out = fopen(path, "wb");
+                    if (out) {
+                        fwrite((void *)addr, 1, size, out);
+                        fclose(out);
+                        LOGI("metadata dumped to %s", path);
                     }
-                } else {
-                    // came back via siglongjmp from the handler
-                    ++skipped;
-                    LOGW("skipped decoy/broken class image=%d index=%d", i, j);
                 }
-                g_dump_guard_active = 0;
-            }
-        }
-        remove_dump_guard();
-        if (skipped) LOGW("dump finished with %d skipped classes", skipped);
-    } else {
-        LOGI("Version less than 2018.3");
-        //使用反射
-        auto corlib = il2cpp_get_corlib();
-        auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
-        auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
-        auto assemblyGetTypes = il2cpp_class_get_method_from_name(assemblyClass, "GetTypes", 0);
-        if (assemblyLoad && assemblyLoad->methodPointer) {
-            LOGI("Assembly::Load: %p", assemblyLoad->methodPointer);
-        } else {
-            LOGI("miss Assembly::Load");
-            return;
-        }
-        if (assemblyGetTypes && assemblyGetTypes->methodPointer) {
-            LOGI("Assembly::GetTypes: %p", assemblyGetTypes->methodPointer);
-        } else {
-            LOGI("miss Assembly::GetTypes");
-            return;
-        }
-        typedef void *(*Assembly_Load_ftn)(void *, Il2CppString *, void *);
-        typedef Il2CppArray *(*Assembly_GetTypes_ftn)(void *, void *);
-        for (int i = 0; i < size; ++i) {
-            auto image = il2cpp_assembly_get_image(assemblies[i]);
-            auto image_name = il2cpp_image_get_name(image);
-            std::string dllHeader = std::string("\n// Dll : ") + image_name;
-            //LOGD("image name : %s", image->name);
-            auto imageName = std::string(image_name);
-            auto pos = imageName.rfind('.');
-            auto imageNameNoExt = imageName.substr(0, pos);
-            auto assemblyFileName = il2cpp_string_new(imageNameNoExt.data());
-            auto reflectionAssembly = ((Assembly_Load_ftn) assemblyLoad->methodPointer)(nullptr,
-                                                                                        assemblyFileName,
-                                                                                        nullptr);
-            auto reflectionTypes = ((Assembly_GetTypes_ftn) assemblyGetTypes->methodPointer)(
-                    reflectionAssembly, nullptr);
-            auto items = reflectionTypes->vector;
-            for (int j = 0; j < reflectionTypes->max_length; ++j) {
-                auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
-                auto type = il2cpp_class_get_type(klass);
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                outStream << dllHeader << dump_type(type);
             }
         }
     }
-    LOGI("write dump file");
-    outStream.close();
-    LOGI("dump done!");
+    fclose(fp);
+    LOGI("memory scan dump done");
 }

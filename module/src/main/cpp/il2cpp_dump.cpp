@@ -378,7 +378,7 @@ static void write_jump(uint64_t target, uint64_t entry) {
     uint64_t page = target & ~0xFFFULL;
     mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
     memcpy((void*)target, code, 16);
-    __builtin___clear_cache((void*)target, (void*)(target + 16));
+    __builtin___clear_cache((char*)target, (char*)(target + 16));
 }
 
 static bool parse_spec(HookSlot& h, const char* spec) {
@@ -468,7 +468,7 @@ static void hook_generic(int idx, void* a0, void* a1, void* a2, void* a3) {
     uint64_t page = t & ~0xFFFULL;
     mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
     memcpy((void*)t, h.saved, 16);
-    __builtin___clear_cache((void*)t, (void*)(t + 16));
+    __builtin___clear_cache((char*)t, (char*)(t + 16));
     ((void(*)(void*,void*,void*,void*))t)(a0, a1, a2, a3);
     write_jump(t, (uint64_t)g_entry_table[idx]);
     pthread_mutex_unlock(&h.lock);
@@ -503,7 +503,7 @@ static int hook_remove(int idx) {
     uint64_t page = h.target & ~0xFFFULL;
     mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
     memcpy((void*)h.target, h.saved, 16);
-    __builtin___clear_cache((void*)h.target, (void*)(h.target + 16));
+    __builtin___clear_cache((char*)h.target, (char*)(h.target + 16));
     h.active = false;
     return 0;
 }

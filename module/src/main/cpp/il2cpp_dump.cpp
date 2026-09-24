@@ -488,7 +488,7 @@ void il2cpp_dump(const char *outDir) {
     while (fgets(line, sizeof(line), fp)) {
         uint64_t start = 0, end = 0;
         char perms[8] = {0};
-        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) continue;
+        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s", &start, &end, perms) != 3) continue;
         if (perms[0] != 'r') continue;
         if (end <= start) continue;
         uint64_t sz = end - start;
@@ -510,7 +510,7 @@ void il2cpp_dump(const char *outDir) {
 
             uint32_t version = 0;
             memcpy(&version, base + off + 4, 4);
-            LOGI("candidate @ %lx version=%u", r.start + off, version);
+            LOGI("candidate @ %" PRIx64 " version=%u", r.start + off, version);
             if (version < 20 || version > 31) continue;  // Unity metadata 版本范围
 
             // 3. 确保 files 目录存在
@@ -529,7 +529,7 @@ void il2cpp_dump(const char *outDir) {
             if (!out) { LOGE("cannot create %s", path); return; }
             size_t written = fwrite(base + off, 1, dumpSize, out);
             fclose(out);
-            LOGI("dumped %zu bytes from %lx -> %s", written, r.start + off, path);
+            LOGI("dumped %zu bytes from %" PRIx64 " -> %s", written, r.start + off, path);
             return;
         }
     }

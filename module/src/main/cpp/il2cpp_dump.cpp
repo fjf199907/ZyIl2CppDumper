@@ -16,11 +16,13 @@
 #include <link.h>
 #include <csetjmp>
 #include <csignal>
+#include <pthread.h>        // ★ 新增
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
-#include <sys/stat.h>  
+#include <sys/stat.h>
+
 #define DO_API(r, n, p) r (*n) p
 
 #include "il2cpp-api-functions.h"
@@ -28,6 +30,7 @@
 #undef DO_API
 
 static uint64_t il2cpp_base = 0;
+static void *g_il2cpp_handle = nullptr;   // ★ 新增: 供 health 扫描线程使用
 
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
@@ -188,7 +191,6 @@ std::string dump_method(Il2CppClass *klass) {
     outPut << "\n\t// Methods\n";
     void *iter = nullptr;
     while (auto method = il2cpp_class_get_methods(klass, &iter)) {
-        // Note: attributes aren't dumped (reading them requires constructing each one).
         if (method->methodPointer) {
             outPut << "\t// RVA: 0x";
             outPut << std::hex << (uint64_t) method->methodPointer - il2cpp_base;
@@ -197,14 +199,10 @@ std::string dump_method(Il2CppClass *klass) {
         } else {
             outPut << "\t// RVA: 0x VA: 0x0";
         }
-        /*if (method->slot != 65535) {
-            outPut << " Slot: " << std::dec << method->slot;
-        }*/
         outPut << "\n\t";
         uint32_t iflags = 0;
         auto flags = il2cpp_method_get_flags(method, &iflags);
         outPut << get_method_modifier(flags);
-        // Note: generic method params (<T>) are omitted; no API to read them.
         auto return_type = il2cpp_method_get_return_type(method);
         if (_il2cpp_type_is_byref(return_type)) {
             outPut << "ref ";
@@ -241,7 +239,6 @@ std::string dump_method(Il2CppClass *klass) {
             outPut.seekp(-2, std::stringstream::cur);
         }
         outPut << ") { }\n";
-        // Note: generic instantiations of this method aren't enumerable via the API.
     }
     return outPut.str();
 }
@@ -251,7 +248,6 @@ std::string dump_property(Il2CppClass *klass) {
     outPut << "\n\t// Properties\n";
     void *iter = nullptr;
     while (auto prop_const = il2cpp_class_get_properties(klass, &iter)) {
-        // Note: no API to enumerate property attributes.
         auto prop = const_cast<PropertyInfo *>(prop_const);
         auto get = il2cpp_property_get_get_method(prop);
         auto set = il2cpp_property_get_set_method(prop);
@@ -291,7 +287,6 @@ std::string dump_field(Il2CppClass *klass) {
     auto is_enum = il2cpp_class_is_enum(klass);
     void *iter = nullptr;
     while (auto field = il2cpp_class_get_fields(klass, &iter)) {
-        // Note: no API to enumerate field attributes.
         outPut << "\t";
         auto attrs = il2cpp_field_get_flags(field);
         auto access = attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK;
@@ -326,7 +321,6 @@ std::string dump_field(Il2CppClass *klass) {
         auto field_type = il2cpp_field_get_type(field);
         auto field_class = il2cpp_class_from_type(field_type);
         outPut << il2cpp_class_get_name(field_class) << " " << il2cpp_field_get_name(field);
-        // Only const values are recoverable; constructor/initializer values are not.
         if (attrs & FIELD_ATTRIBUTE_LITERAL) {
             if (is_enum) {
                 uint64_t val = 0;
@@ -352,7 +346,6 @@ std::string dump_type(const Il2CppType *type) {
     if (flags & TYPE_ATTRIBUTE_SERIALIZABLE) {
         outPut << "[Serializable]\n";
     }
-    // Note: other attributes aren't dumped (reading them requires constructing each one).
     auto is_valuetype = il2cpp_class_is_valuetype(klass);
     auto is_enum = il2cpp_class_is_enum(klass);
     auto visibility = flags & TYPE_ATTRIBUTE_VISIBILITY_MASK;
@@ -392,7 +385,6 @@ std::string dump_type(const Il2CppType *type) {
     } else {
         outPut << "class ";
     }
-    // Note: generic type params (<T>) are omitted; no API to read them.
     outPut << il2cpp_class_get_name(klass);
     std::vector<std::string> extends;
     auto parent = il2cpp_class_get_parent(klass);
@@ -416,13 +408,13 @@ std::string dump_type(const Il2CppType *type) {
     outPut << dump_field(klass);
     outPut << dump_property(klass);
     outPut << dump_method(klass);
-    // Note: events aren't dumped; EventInfo is opaque with no accessor APIs.
     outPut << "}\n";
     return outPut.str();
 }
 
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
+    g_il2cpp_handle = handle;          // ★ 新增: 保存 handle
     init_il2cpp_api(handle);
     xdl_info_t xinfo{};
     if (xdl_info(handle, XDL_DI_DLINFO, &xinfo) == 0 && xinfo.dli_fbase) {
@@ -440,7 +432,6 @@ static struct sigaction g_old_segv{};
 static struct sigaction g_old_bus{};
 
 static void dump_fault_handler(int sig, siginfo_t *info, void *ucontext) {
-    // Only catch faults on our dump thread; chain everything else.
     if (g_dump_guard_active && gettid() == g_dump_tid) {
         siglongjmp(g_dump_jmp, sig);
     }
@@ -462,14 +453,15 @@ static void install_dump_guard() {
     sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &g_old_segv);
-    sigaction(SIGBUS, &sa, &g_old_bus);
+    sigaction(SIGBUS,  &sa, &g_old_bus);
 }
 
 static void remove_dump_guard() {
     g_dump_guard_active = 0;
     sigaction(SIGSEGV, &g_old_segv, nullptr);
-    sigaction(SIGBUS, &g_old_bus, nullptr);
+    sigaction(SIGBUS,  &g_old_bus,  nullptr);
 }
+
 // ---------------------------------------------------------------------------
 // --- 追加 ---
 void dump_il2cpp_so(const char *outDir) {
@@ -483,7 +475,6 @@ void dump_il2cpp_so(const char *outDir) {
     while (fgets(line, sizeof(line), fp)) {
         uint64_t s = 0, e = 0;
         char perms[8] = {0}, path[512] = {0};
-        // maps 行格式: start-end perms offset dev inode path
         if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %*s %*s %*s %511s",
                    &s, &e, perms, path) != 4) continue;
         if (!strstr(path, "libil2cpp.so")) continue;
@@ -503,7 +494,6 @@ void dump_il2cpp_so(const char *outDir) {
     LOGI("libil2cpp.so base=0x%" PRIx64 " hi=0x%" PRIx64 " size=%" PRIu64,
          base, hi, total);
 
-    // 直接按 vaddr 顺序拼成一个大 buffer，offset = vaddr - base
     uint8_t *buf = (uint8_t *)calloc(1, total);
     if (!buf) { LOGE("calloc %" PRIu64 " failed", total); return; }
 
@@ -530,10 +520,160 @@ void dump_il2cpp_so(const char *outDir) {
     free(buf);
 }
 // --- /追加 ---
+
+// ===========================================================================
+// ★ 新增: 运行时枚举 Health / CharacterStat / PlayerStates / HealthBar
+// 因为这几个是 HybridCLR 热更类, 不在 global-metadata.dat 里, Il2CppDumper 看不到。
+// 直接走 il2cpp domain/assembly/image/class/field 的运行时 API, 打印字段偏移。
+// ===========================================================================
+
+struct HealthScanApi {
+    void* (*domain_get)();
+    void* (*domain_get_assemblies)(void*, size_t*);
+    void* (*assembly_get_image)(void*);
+    size_t (*image_get_class_count)(void*);
+    void* (*image_get_class)(void*, size_t);
+    const char* (*image_get_name)(void*);
+    const char* (*class_get_namespace)(void*);
+    const char* (*class_get_name)(void*);
+    void* (*class_get_fields)(void*, void**);
+    const char* (*field_get_name)(void*);
+    size_t (*field_get_offset)(void*);
+    void* (*field_get_type)(void*);
+    void* (*class_from_type)(void*);
+};
+
+static bool resolve_health_api(HealthScanApi &api, void *handle) {
+    memset(&api, 0, sizeof(api));
+    api.domain_get            = (decltype(api.domain_get))           xdl_sym(handle, "il2cpp_domain_get", nullptr);
+    api.domain_get_assemblies = (decltype(api.domain_get_assemblies))xdl_sym(handle, "il2cpp_domain_get_assemblies", nullptr);
+    api.assembly_get_image    = (decltype(api.assembly_get_image))   xdl_sym(handle, "il2cpp_assembly_get_image", nullptr);
+    api.image_get_class_count = (decltype(api.image_get_class_count))xdl_sym(handle, "il2cpp_image_get_class_count", nullptr);
+    api.image_get_class       = (decltype(api.image_get_class))      xdl_sym(handle, "il2cpp_image_get_class", nullptr);
+    api.image_get_name        = (decltype(api.image_get_name))       xdl_sym(handle, "il2cpp_image_get_name", nullptr);
+    api.class_get_namespace   = (decltype(api.class_get_namespace))  xdl_sym(handle, "il2cpp_class_get_namespace", nullptr);
+    api.class_get_name        = (decltype(api.class_get_name))       xdl_sym(handle, "il2cpp_class_get_name", nullptr);
+    api.class_get_fields      = (decltype(api.class_get_fields))     xdl_sym(handle, "il2cpp_class_get_fields", nullptr);
+    api.field_get_name        = (decltype(api.field_get_name))       xdl_sym(handle, "il2cpp_field_get_name", nullptr);
+    api.field_get_offset      = (decltype(api.field_get_offset))     xdl_sym(handle, "il2cpp_field_get_offset", nullptr);
+    api.field_get_type        = (decltype(api.field_get_type))       xdl_sym(handle, "il2cpp_field_get_type", nullptr);
+    api.class_from_type       = (decltype(api.class_from_type))      xdl_sym(handle, "il2cpp_class_from_type", nullptr);
+
+    bool ok = api.domain_get && api.domain_get_assemblies && api.assembly_get_image
+              && api.image_get_class_count && api.image_get_class
+              && api.class_get_namespace && api.class_get_name && api.class_get_fields
+              && api.field_get_name && api.field_get_offset && api.field_get_type
+              && api.class_from_type;
+    LOGI("resolve_health_api: %s", ok ? "ok" : "FAILED");
+    LOGI("  domain_get=%p dga=%p agi=%p", api.domain_get, api.domain_get_assemblies, api.assembly_get_image);
+    LOGI("  igcc=%p igc=%p ign=%p", api.image_get_class_count, api.image_get_class, api.image_get_name);
+    LOGI("  cgn=%p cgn2=%p cgf=%p", api.class_get_namespace, api.class_get_name, api.class_get_fields);
+    LOGI("  fgn=%p fgo=%p fgt=%p cft=%p",
+         api.field_get_name, api.field_get_offset, api.field_get_type, api.class_from_type);
+    return ok;
+}
+
+static int scan_health_classes_once(FILE *out, HealthScanApi &api) {
+    void *domain = api.domain_get();
+    if (!domain) return -1;
+
+    size_t asmCount = 0;
+    void **assemblies = (void **)api.domain_get_assemblies(domain, &asmCount);
+    if (!assemblies) return -1;
+    if (out) fprintf(out, "assemblies count = %zu\n", asmCount);
+
+    int hits = 0;
+    for (size_t i = 0; i < asmCount; ++i) {
+        void *image = api.assembly_get_image(assemblies[i]);
+        if (!image) continue;
+
+        const char *imageName = api.image_get_name ? api.image_get_name(image) : "?";
+        size_t classCount = api.image_get_class_count(image);
+
+        for (size_t j = 0; j < classCount; ++j) {
+            void *klass = api.image_get_class(image, j);
+            if (!klass) continue;
+
+            const char *ns   = api.class_get_namespace(klass);
+            const char *name = api.class_get_name(klass);
+            if (!name) continue;
+
+            bool hit = strstr(name, "Health")
+                    || strstr(name, "CharacterStat")
+                    || strstr(name, "PlayerStates")
+                    || strstr(name, "HealthBar")
+                    || (ns && strstr(ns, "Health"));
+            if (!hit) continue;
+
+            ++hits;
+            if (out) {
+                fprintf(out, "\n=== image=%s class %s.%s ===\n",
+                        imageName ? imageName : "?", ns ? ns : "", name);
+            }
+
+            void *fiter = nullptr;
+            while (auto field = api.class_get_fields(klass, &fiter)) {
+                void *fieldType = api.field_get_type(field);
+                const char *typeName = "?";
+                if (fieldType) {
+                    void *fieldClass = api.class_from_type(fieldType);
+                    if (fieldClass) {
+                        const char *tn = api.class_get_name(fieldClass);
+                        if (tn) typeName = tn;
+                    }
+                }
+                if (out) {
+                    fprintf(out, "  field %-32s offset=0x%zx type=%s\n",
+                            api.field_get_name(field),
+                            api.field_get_offset(field),
+                            typeName);
+                }
+            }
+        }
+    }
+    if (out) fflush(out);
+    return hits;
+}
+
+static void* health_scanner_thread(void *arg) {
+    void *handle = arg;
+
+    HealthScanApi api;
+    if (!resolve_health_api(api, handle)) {
+        LOGE("health scan: resolve api failed, abort");
+        return nullptr;
+    }
+
+    const char *path = "/data/user/0/com.pinkcore.majo.erolabs/files/health_classes.txt";
+    FILE *out = fopen(path, "w");
+    if (!out) LOGE("health scan: open %s failed", path);
+    LOGI("health scan: start, out=%s", path);
+
+    for (int round = 0; round < 300; ++round) {
+        sleep(2);
+        int hits = scan_health_classes_once(out, api);
+        if (hits > 0) {
+            LOGI("health scan: round %d hits=%d, done", round, hits);
+            if (out) { fclose(out); out = nullptr; }
+            return nullptr;
+        }
+        if ((round % 5) == 0) {
+            LOGI("health scan: round %d hits=0, keep waiting", round);
+        }
+    }
+
+    if (out) fclose(out);
+    LOGI("health scan: timeout, no class found");
+    return nullptr;
+}
+
+// ===========================================================================
+// ★ /新增
+// ===========================================================================
+
 void il2cpp_dump(const char *outDir) {
     LOGI("memory scan dump start");
 
-    // 关键 1:把信号保护装上
     install_dump_guard();
     g_dump_guard_active = 1;
 
@@ -567,8 +707,6 @@ void il2cpp_dump(const char *outDir) {
         fclose(fp);
 
         for (auto &r : regions) {
-            // 关键 2:每个 region 单独 setjmp,
-            // region 被 munmap 时跳到 recover 继续下一个
             if (sigsetjmp(g_dump_jmp, 1) != 0) {
                 LOGW("region %" PRIx64 "-%" PRIx64 " faulted, skip", r.start, r.end);
                 continue;
@@ -596,7 +734,6 @@ void il2cpp_dump(const char *outDir) {
                 uint64_t dumpSize = remaining > (128ull * 1024 * 1024)
                                     ? (128ull * 1024 * 1024) : remaining;
 
-                // 关键 3:写盘也包在 guard 里 —— 如果这块区域在写过程中被换掉
                 if (sigsetjmp(g_dump_jmp, 1) != 0) {
                     LOGW("faulted while writing, skip");
                     continue;
@@ -605,11 +742,27 @@ void il2cpp_dump(const char *outDir) {
                 if (!out) { LOGE("fopen fail"); continue; }
                 size_t w = fwrite(base + off, 1, dumpSize, out);
                 fclose(out);
-               LOGI("dumped %zu bytes -> %s", w, path);
-dump_il2cpp_so(outDir);          // ★ 加这一行
-g_dump_guard_active = 0;
-remove_dump_guard();
-return;
+                LOGI("dumped %zu bytes -> %s", w, path);
+
+                dump_il2cpp_so(outDir);
+
+                g_dump_guard_active = 0;
+                remove_dump_guard();
+
+                // ★ 新增: 启动 health 扫描线程
+                if (g_il2cpp_handle) {
+                    pthread_t th;
+                    if (pthread_create(&th, nullptr, health_scanner_thread, g_il2cpp_handle) == 0) {
+                        pthread_detach(th);
+                        LOGI("health scanner thread started");
+                    } else {
+                        LOGE("failed to create health scanner thread");
+                    }
+                } else {
+                    LOGE("g_il2cpp_handle is null, skip health scanner");
+                }
+
+                return;
             }
         }
         LOGI("attempt %d: %zu regions, no hit", attempt, regions.size());

@@ -471,7 +471,65 @@ static void remove_dump_guard() {
     sigaction(SIGBUS, &g_old_bus, nullptr);
 }
 // ---------------------------------------------------------------------------
+// --- 追加 ---
+void dump_il2cpp_so(const char *outDir) {
+    struct Seg { uint64_t start, end; };
+    std::vector<Seg> segs;
+    uint64_t base = UINT64_MAX, hi = 0;
 
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) { LOGE("cannot open maps"); return; }
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        uint64_t s = 0, e = 0;
+        char perms[8] = {0}, path[512] = {0};
+        // maps 行格式: start-end perms offset dev inode path
+        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %*s %*s %*s %511s",
+                   &s, &e, perms, path) != 4) continue;
+        if (!strstr(path, "libil2cpp.so")) continue;
+        if (perms[0] != 'r') continue;
+        if (s < base) base = s;
+        if (e > hi)   hi = e;
+        segs.push_back({s, e});
+    }
+    fclose(fp);
+
+    if (segs.empty() || base == UINT64_MAX) {
+        LOGE("libil2cpp.so not found in maps");
+        return;
+    }
+
+    uint64_t total = hi - base;
+    LOGI("libil2cpp.so base=0x%" PRIx64 " hi=0x%" PRIx64 " size=%" PRIu64,
+         base, hi, total);
+
+    // 直接按 vaddr 顺序拼成一个大 buffer，offset = vaddr - base
+    uint8_t *buf = (uint8_t *)calloc(1, total);
+    if (!buf) { LOGE("calloc %" PRIu64 " failed", total); return; }
+
+    for (auto &sg : segs) {
+        uint64_t off = sg.start - base;
+        uint64_t len = sg.end - sg.start;
+        if (off + len > total) continue;
+        if (sigsetjmp(g_dump_jmp, 1) == 0) {
+            memcpy(buf + off, (void *)sg.start, len);
+        } else {
+            LOGW("segment 0x%" PRIx64 "-0x%" PRIx64 " faulted, zero-filled",
+                 sg.start, sg.end);
+        }
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/files/libil2cpp_dump.so", outDir);
+    FILE *out = fopen(path, "wb");
+    if (out) {
+        size_t w = fwrite(buf, 1, total, out);
+        fclose(out);
+        LOGI("dumped libil2cpp.so %zu bytes -> %s", w, path);
+    }
+    free(buf);
+}
+// --- /追加 ---
 void il2cpp_dump(const char *outDir) {
     LOGI("memory scan dump start");
 
@@ -547,11 +605,11 @@ void il2cpp_dump(const char *outDir) {
                 if (!out) { LOGE("fopen fail"); continue; }
                 size_t w = fwrite(base + off, 1, dumpSize, out);
                 fclose(out);
-                LOGI("dumped %zu bytes -> %s", w, path);
-
-                g_dump_guard_active = 0;
-                remove_dump_guard();
-                return;
+               LOGI("dumped %zu bytes -> %s", w, path);
+dump_il2cpp_so(outDir);          // ★ 加这一行
+g_dump_guard_active = 0;
+remove_dump_guard();
+return;
             }
         }
         LOGI("attempt %d: %zu regions, no hit", attempt, regions.size());

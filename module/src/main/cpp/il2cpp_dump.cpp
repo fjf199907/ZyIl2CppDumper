@@ -474,64 +474,87 @@ static void remove_dump_guard() {
 
 void il2cpp_dump(const char *outDir) {
     LOGI("memory scan dump start");
-    sleep(15);  // 等游戏完成 il2cpp 初始化和 metadata 解密
 
-    // 1. 枚举所有可读内存区域
-    struct Region { uint64_t start; uint64_t end; };
-    std::vector<Region> regions;
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) {
-        LOGE("cannot open /proc/self/maps");
-        return;
-    }
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        uint64_t start = 0, end = 0;
-        char perms[8] = {0};
-        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s", &start, &end, perms) != 3) continue;
-        if (perms[0] != 'r') continue;
-        if (end <= start) continue;
-        uint64_t sz = end - start;
-        if (sz < 0x10000) continue;
-        if (sz > 256 * 1024 * 1024) continue;
-        regions.push_back({start, end});
-    }
-    fclose(fp);
-    LOGI("scanning %zu readable regions", regions.size());
+    // 输出目录准备一次即可
+    char dirPath[512];
+    snprintf(dirPath, sizeof(dirPath), "%s/files", outDir);
+    mkdir(dirPath, 0777);
 
-    // 2. 逐区域扫 metadata 魔数
+    char path[512];
+    snprintf(path, sizeof(path), "%s/files/global-metadata.dat", outDir);
+
     const uint8_t MAGIC[4] = {0xAF, 0x1B, 0xB1, 0xFA};
-    for (auto &r : regions) {
-        uint8_t *base = (uint8_t *)r.start;
-        uint64_t sz = r.end - r.start;
 
-        for (uint64_t off = 0; off + 32 < sz; off += 4) {
-            if (memcmp(base + off, MAGIC, 4) != 0) continue;
+    // 轮询 60 秒，每秒重扫一次，直到命中真 metadata
+    for (int attempt = 1; attempt <= 60; ++attempt) {
+        sleep(1);
 
-            uint32_t version = 0;
-            memcpy(&version, base + off + 4, 4);
-            LOGI("candidate @ %" PRIx64 " version=%u", r.start + off, version);
-            if (version < 20 || version > 31) continue;  // Unity metadata 版本范围
+        // ---- 枚举可读 region ----
+        struct Region { uint64_t start; uint64_t end; };
+        std::vector<Region> regions;
+        FILE *fp = fopen("/proc/self/maps", "r");
+        if (!fp) { LOGE("cannot open /proc/self/maps"); return; }
 
-            // 3. 确保 files 目录存在
-            char dirPath[512];
-            snprintf(dirPath, sizeof(dirPath), "%s/files", outDir);
-            mkdir(dirPath, 0777);
-
-            // 4. dump
-            char path[512];
-            snprintf(path, sizeof(path), "%s/files/global-metadata.dat", outDir);
-
-            uint64_t dumpSize = sz - off;
-            if (dumpSize > 128 * 1024 * 1024) dumpSize = 128 * 1024 * 1024;
-
-            FILE *out = fopen(path, "wb");
-            if (!out) { LOGE("cannot create %s", path); return; }
-            size_t written = fwrite(base + off, 1, dumpSize, out);
-            fclose(out);
-            LOGI("dumped %zu bytes from %" PRIx64 " -> %s", written, r.start + off, path);
-            return;
+        char line[1024];
+        while (fgets(line, sizeof(line), fp)) {
+            uint64_t start = 0, end = 0;
+            char perms[8] = {0};
+            if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s", &start, &end, perms) != 3) continue;
+            if (perms[0] != 'r') continue;                    // 只扫可读
+            if (end <= start) continue;
+            uint64_t sz = end - start;
+            if (sz < 0x10000) continue;                       // 太小的跳过
+            if (sz > 512ull * 1024 * 1024) continue;          // 太大跳过
+            regions.push_back({start, end});
         }
+        fclose(fp);
+
+        // ---- 逐 region 扫魔数 ----
+        for (auto &r : regions) {
+            uint8_t *base = (uint8_t *)r.start;
+            uint64_t sz = r.end - r.start;
+
+            for (uint64_t off = 0; off + 16 < sz; off += 4) {
+                // 先比第一字节，快过 memcmp
+                if (base[off] != 0xAF) continue;
+                if (memcmp(base + off, MAGIC, 4) != 0) continue;
+
+                uint32_t version = 0;
+                memcpy(&version, base + off + 4, 4);
+
+                if (version < 20 || version > 31) continue;
+
+                // 二次验证：紧跟的 stringLiteralOffset 应当接近 header 尾部，
+                // 对 Unity 6000(31) 大致是个合理的小值（< 0x10000），防止撞巧合。
+                int32_t stringLiteralOffset = 0;
+                if (off + 12 < sz) memcpy(&stringLiteralOffset, base + off + 8, 4);
+                if (stringLiteralOffset < 0 || stringLiteralOffset > 0x200000) {
+                    LOGW("reject candidate @ %" PRIx64 " ver=%u sl=%d",
+                         r.start + off, version, stringLiteralOffset);
+                    continue;
+                }
+
+                LOGI("HIT candidate @ %" PRIx64 " ver=%u sl=0x%x (attempt %d)",
+                     r.start + off, version, stringLiteralOffset, attempt);
+
+                uint64_t remaining = sz - off;
+                uint64_t dumpSize = remaining > (128ull * 1024 * 1024)
+                                    ? (128ull * 1024 * 1024)
+                                    : remaining;
+
+                FILE *out = fopen(path, "wb");
+                if (!out) { LOGE("cannot create %s", path); continue; }
+                size_t written = fwrite(base + off, 1, dumpSize, out);
+                fclose(out);
+
+                LOGI("dumped %zu bytes @ %" PRIx64 " ver=%u -> %s",
+                     written, r.start + off, version, path);
+                return;
+            }
+        }
+
+        LOGI("attempt %d: no metadata yet (%zu regions)", attempt, regions.size());
     }
-    LOGI("no metadata candidate found");
+
+    LOGI("no metadata candidate found after 60s");
 }

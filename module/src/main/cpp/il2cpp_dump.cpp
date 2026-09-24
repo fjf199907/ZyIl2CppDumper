@@ -18,10 +18,10 @@
 #include <csignal>
 #include <pthread.h>
 #include <sys/stat.h>
-#include <sys/socket.h>        // ★ 新增
-#include <netinet/in.h>        // ★ 新增
-#include <arpa/inet.h>         // ★ 新增
-#include <errno.h>             // ★ 新增
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
@@ -591,6 +591,59 @@ static void rpc_dump_class(FILE *out, void *klass) {
     }
 }
 
+// ★ 新增: 打印类的方法 (VA/RVA + 签名)
+static void rpc_dump_methods(FILE *out, const char *cls) {
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) { fprintf(out, "ERR: no domain\n"); return; }
+    size_t asmCount = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+    int found = 0;
+    for (size_t i = 0; i < asmCount; ++i) {
+        void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        const char *imageName = g_rpc_api.image_get_name
+                              ? g_rpc_api.image_get_name(image) : "?";
+        size_t classCount = g_rpc_api.image_get_class_count(image);
+        for (size_t j = 0; j < classCount; ++j) {
+            void *klass = g_rpc_api.image_get_class(image, j);
+            if (!klass) continue;
+            const char *name = g_rpc_api.class_get_name(klass);
+            const char *ns   = g_rpc_api.class_get_namespace(klass);
+            if (!name) continue;
+            char full[512];
+            snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name);
+            if (strcmp(full, cls) != 0 && strcmp(name, cls) != 0) continue;
+
+            found++;
+            fprintf(out, "\n=== %s (image=%s) ===\n", full, imageName ? imageName : "?");
+
+            void *iter = nullptr;
+            while (auto method = il2cpp_class_get_methods(klass, &iter)) {
+                if (!method) continue;
+                const char *mname = il2cpp_method_get_name(method);
+                uint32_t iflags = 0;
+                uint32_t mflags = il2cpp_method_get_flags(method, &iflags);
+                uint32_t pc = il2cpp_method_get_param_count(method);
+                uint64_t va = (uint64_t)method->methodPointer;
+                uint64_t rva = va ? va - il2cpp_base : 0;
+
+                fprintf(out, "  VA=0x%016" PRIx64 " RVA=0x%08" PRIx64 " %s%s(",
+                        va, rva,
+                        (mflags & METHOD_ATTRIBUTE_STATIC) ? "static " : "",
+                        mname ? mname : "?");
+                for (uint32_t p = 0; p < pc; ++p) {
+                    auto param = il2cpp_method_get_param(method, p);
+                    auto pclass = il2cpp_class_from_type(param);
+                    fprintf(out, "%s%s", p ? ", " : "",
+                            pclass ? il2cpp_class_get_name(pclass) : "?");
+                }
+                fprintf(out, ")\n");
+            }
+        }
+    }
+    fprintf(out, "\n--- found %d ---\n", found);
+}
+
 static int rpc_scan(FILE *out, const char *imagePattern,
                     const char *classPattern, bool dumpAllInMatchedImage) {
     void *domain = g_rpc_api.domain_get();
@@ -697,6 +750,15 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "\n--- found %d ---\n", found);
         }
     }
+    // ★ 新增: methods 命令
+    else if (strncmp(cmd, "methods ", 8) == 0) {
+        char cls[256] = {0};
+        if (sscanf(cmd + 8, "%255s", cls) == 1) {
+            rpc_dump_methods(out, cls);
+        } else {
+            fprintf(out, "ERR: usage: methods <ClassName>\n");
+        }
+    }
     else if (strncmp(cmd, "read ", 5) == 0) {
         uint64_t addr = 0; int size = 0;
         if (sscanf(cmd + 5, "%" SCNx64 " %d", &addr, &size) == 2 && size > 0 && size <= 4096) {
@@ -750,7 +812,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else {
         fprintf(out, "ERR: unknown cmd\n");
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | "
-                     "dumpimage <img> | class <name> | "
+                     "dumpimage <img> | class <name> | methods <name> | "
                      "read <addr> <sz> | write <addr> <hex> | "
                      "readf <addr> | readi <addr>\n");
     }
@@ -902,7 +964,6 @@ void il2cpp_dump(const char *outDir) {
                 g_dump_guard_active = 0;
                 remove_dump_guard();
 
-                // ★ 启动 RPC server（取代 health_scanner_thread）
                 if (g_il2cpp_handle) {
                     pthread_t th;
                     if (pthread_create(&th, nullptr, rpc_server_thread, nullptr) == 0) {

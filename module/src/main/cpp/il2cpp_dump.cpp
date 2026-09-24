@@ -20,7 +20,7 @@
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
-
+#include <sys/stat.h>  
 #define DO_API(r, n, p) r (*n) p
 
 #include "il2cpp-api-functions.h"
@@ -427,14 +427,8 @@ void il2cpp_api_init(void *handle) {
     xdl_info_t xinfo{};
     if (xdl_info(handle, XDL_DI_DLINFO, &xinfo) == 0 && xinfo.dli_fbase) {
         il2cpp_base = reinterpret_cast<uint64_t>(xinfo.dli_fbase);
-    } else if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
     }
     LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    // Unity 6000: skip runtime wait and thread attach — both crash before il2cpp is ready.
 }
 
 // Scoped SIGSEGV/SIGBUS guard: skip decoy classes whose malformed metadata
@@ -480,36 +474,64 @@ static void remove_dump_guard() {
 
 void il2cpp_dump(const char *outDir) {
     LOGI("memory scan dump start");
-    sleep(15);  // 等游戏初始化
+    sleep(15);  // 等游戏完成 il2cpp 初始化和 metadata 解密
 
-    // 遍历 /proc/self/maps，找 r-- 可读段
+    // 1. 枚举所有可读内存区域
+    struct Region { uint64_t start; uint64_t end; };
+    std::vector<Region> regions;
     FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) {
+        LOGE("cannot open /proc/self/maps");
+        return;
+    }
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
-        uint64_t start, end;
-        char perms[8];
+        uint64_t start = 0, end = 0;
+        char perms[8] = {0};
         if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) continue;
-        if (strncmp(perms, "r--", 3) != 0) continue;
-
-        for (uint64_t addr = start; addr < end - 0x100; addr += 0x1000) {
-            uint32_t *p = (uint32_t *)addr;
-            if (p[0] == 0xFAB11BAF) {  // metadata magic
-                // 前 8 字节后跟文件大小
-                uint32_t size = p[2];
-                if (size > 1024 && size < 100 * 1024 * 1024) {
-                    LOGI("metadata found @ %lx size=%u", addr, size);
-                    char path[256];
-                    snprintf(path, sizeof(path), "%s/files/global-metadata.dat", outDir);
-                    FILE *out = fopen(path, "wb");
-                    if (out) {
-                        fwrite((void *)addr, 1, size, out);
-                        fclose(out);
-                        LOGI("metadata dumped to %s", path);
-                    }
-                }
-            }
-        }
+        if (perms[0] != 'r') continue;
+        if (end <= start) continue;
+        uint64_t sz = end - start;
+        if (sz < 0x10000) continue;
+        if (sz > 256 * 1024 * 1024) continue;
+        regions.push_back({start, end});
     }
     fclose(fp);
-    LOGI("memory scan dump done");
+    LOGI("scanning %zu readable regions", regions.size());
+
+    // 2. 逐区域扫 metadata 魔数
+    const uint8_t MAGIC[4] = {0xAF, 0x1B, 0xB1, 0xFA};
+    for (auto &r : regions) {
+        uint8_t *base = (uint8_t *)r.start;
+        uint64_t sz = r.end - r.start;
+
+        for (uint64_t off = 0; off + 32 < sz; off += 4) {
+            if (memcmp(base + off, MAGIC, 4) != 0) continue;
+
+            uint32_t version = 0;
+            memcpy(&version, base + off + 4, 4);
+            LOGI("candidate @ %lx version=%u", r.start + off, version);
+            if (version < 20 || version > 31) continue;  // Unity metadata 版本范围
+
+            // 3. 确保 files 目录存在
+            char dirPath[512];
+            snprintf(dirPath, sizeof(dirPath), "%s/files", outDir);
+            mkdir(dirPath, 0777);
+
+            // 4. dump
+            char path[512];
+            snprintf(path, sizeof(path), "%s/files/global-metadata.dat", outDir);
+
+            uint64_t dumpSize = sz - off;
+            if (dumpSize > 128 * 1024 * 1024) dumpSize = 128 * 1024 * 1024;
+
+            FILE *out = fopen(path, "wb");
+            if (!out) { LOGE("cannot create %s", path); return; }
+            size_t written = fwrite(base + off, 1, dumpSize, out);
+            fclose(out);
+            LOGI("dumped %zu bytes from %lx -> %s", written, r.start + off, path);
+            return;
+        }
+    }
+    LOGI("no metadata candidate found");
 }

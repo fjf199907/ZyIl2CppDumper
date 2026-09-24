@@ -480,6 +480,20 @@ static void remove_dump_guard() {
 
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
+    // 等待 il2cpp 运行时完全初始化
+    if (il2cpp_domain_get) {
+        for (int i = 0; i < 120; ++i) {
+            auto domain = il2cpp_domain_get();
+            if (domain) {
+                LOGI("il2cpp_domain_get returned non-null, proceeding to dump");
+                break;
+            }
+            LOGI("Waiting for il2cpp_init...");
+            sleep(1);
+        }
+    } else {
+        LOGW("il2cpp_domain_get missing; cannot wait");
+    }
     // Bail if the essential walk APIs are missing, rather than null-calling.
     if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies ||
         !il2cpp_assembly_get_image || !il2cpp_image_get_name) {

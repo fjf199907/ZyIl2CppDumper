@@ -1,7 +1,7 @@
 //
 // Created by Perfare on 2020/7/4.
 //
-#define _GNU_SOURCE
+
 #include "il2cpp_dump.h"
 #include <dlfcn.h>
 #include <cstdlib>
@@ -463,7 +463,6 @@ static void remove_dump_guard() {
     sigaction(SIGBUS,  &g_old_bus,  nullptr);
 }
 
-// ---------------------------------------------------------------------------
 void dump_il2cpp_so(const char *outDir) {
     struct Seg { uint64_t start, end; };
     std::vector<Seg> segs;
@@ -521,7 +520,7 @@ void dump_il2cpp_so(const char *outDir) {
 }
 
 // ===========================================================================
-// ★ RPC server
+// RPC server
 // ===========================================================================
 
 struct HealthScanApi {
@@ -591,7 +590,7 @@ static void rpc_dump_class(FILE *out, void *klass) {
     }
 }
 
-// ★ 新增: 打印类的方法 (VA/RVA + 签名)
+// 打印类的方法 (VA/RVA + 签名)
 static void rpc_dump_methods(FILE *out, const char *cls) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) { fprintf(out, "ERR: no domain\n"); return; }
@@ -605,10 +604,11 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
                               ? g_rpc_api.image_get_name(image) : "?";
         size_t classCount = g_rpc_api.image_get_class_count(image);
         for (size_t j = 0; j < classCount; ++j) {
-            void *klass = g_rpc_api.image_get_class(image, j);
-            if (!klass) continue;
-            const char *name = g_rpc_api.class_get_name(klass);
-            const char *ns   = g_rpc_api.class_get_namespace(klass);
+            void *klass_v = g_rpc_api.image_get_class(image, j);
+            if (!klass_v) continue;
+            Il2CppClass *klass = (Il2CppClass *)klass_v;
+            const char *name = g_rpc_api.class_get_name(klass_v);
+            const char *ns   = g_rpc_api.class_get_namespace(klass_v);
             if (!name) continue;
             char full[512];
             snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name);
@@ -750,7 +750,6 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "\n--- found %d ---\n", found);
         }
     }
-    // ★ 新增: methods 命令
     else if (strncmp(cmd, "methods ", 8) == 0) {
         char cls[256] = {0};
         if (sscanf(cmd + 8, "%255s", cls) == 1) {

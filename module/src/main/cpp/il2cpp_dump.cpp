@@ -673,6 +673,7 @@ static void rpc_get_static(FILE *out, const char *cls, const char *fldname) {
         for (size_t j = 0; j < classCount; ++j) {
             void *klass_v = g_rpc_api.image_get_class(image, j);
             if (!klass_v) continue;
+            Il2CppClass *klass = (Il2CppClass *)klass_v;
             const char *name = g_rpc_api.class_get_name(klass_v);
             const char *ns   = g_rpc_api.class_get_namespace(klass_v);
             if (!name) continue;
@@ -681,7 +682,7 @@ static void rpc_get_static(FILE *out, const char *cls, const char *fldname) {
             if (strcmp(full, cls) != 0 && strcmp(name, cls) != 0) continue;
 
             void *fiter = nullptr;
-            while (auto field = il2cpp_class_get_fields(klass_v, &fiter)) {
+            while (auto field = il2cpp_class_get_fields(klass, &fiter)) {
                 const char *fn = g_rpc_api.field_get_name(field);
                 if (!fn || strcmp(fn, fldname) != 0) continue;
                 auto attrs = il2cpp_field_get_flags(field);

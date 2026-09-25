@@ -625,7 +625,79 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
     }
     fprintf(out, "\n--- found %d ---\n", found);
 }
+static void rpc_list_static(FILE *out, const char *cls) {
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) return;
+    size_t asmCount = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+    int found = 0;
+    for (size_t i = 0; i < asmCount; ++i) {
+        void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        const char *imageName = g_rpc_api.image_get_name ? g_rpc_api.image_get_name(image) : "?";
+        size_t classCount = g_rpc_api.image_get_class_count(image);
+        for (size_t j = 0; j < classCount; ++j) {
+            void *klass_v = g_rpc_api.image_get_class(image, j);
+            if (!klass_v) continue;
+            Il2CppClass *klass = (Il2CppClass *)klass_v;
+            const char *name = g_rpc_api.class_get_name(klass_v);
+            const char *ns   = g_rpc_api.class_get_namespace(klass_v);
+            if (!name) continue;
+            char full[512];
+            snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name);
+            if (strcmp(full, cls) != 0 && strcmp(name, cls) != 0) continue;
+            found++;
+            fprintf(out, "=== %s (image=%s) ===\n", full, imageName ? imageName : "?");
+            void *fiter = nullptr;
+            while (auto field = il2cpp_class_get_fields(klass, &fiter)) {
+                auto attrs = il2cpp_field_get_flags(field);
+                if (!(attrs & FIELD_ATTRIBUTE_STATIC)) continue;
+                const char *fn = g_rpc_api.field_get_name(field);
+                fprintf(out, "  [S] %s\n", fn ? fn : "?");
+            }
+        }
+    }
+    fprintf(out, "\n--- found %d ---\n", found);
+}
 
+static void rpc_get_static(FILE *out, const char *cls, const char *fldname) {
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) return;
+    size_t asmCount = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+    int found = 0;
+    for (size_t i = 0; i < asmCount; ++i) {
+        void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        size_t classCount = g_rpc_api.image_get_class_count(image);
+        for (size_t j = 0; j < classCount; ++j) {
+            void *klass_v = g_rpc_api.image_get_class(image, j);
+            if (!klass_v) continue;
+            const char *name = g_rpc_api.class_get_name(klass_v);
+            const char *ns   = g_rpc_api.class_get_namespace(klass_v);
+            if (!name) continue;
+            char full[512];
+            snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name);
+            if (strcmp(full, cls) != 0 && strcmp(name, cls) != 0) continue;
+
+            void *fiter = nullptr;
+            while (auto field = il2cpp_class_get_fields(klass_v, &fiter)) {
+                const char *fn = g_rpc_api.field_get_name(field);
+                if (!fn || strcmp(fn, fldname) != 0) continue;
+                auto attrs = il2cpp_field_get_flags(field);
+                if (!(attrs & FIELD_ATTRIBUTE_STATIC)) {
+                    fprintf(out, "  %s.%s: not static\n", full, fldname);
+                    continue;
+                }
+                uint64_t val = 0;
+                il2cpp_field_static_get_value(field, &val);
+                found++;
+                fprintf(out, "  %s.%s = 0x%" PRIx64 "\n", full, fldname, val);
+            }
+        }
+    }
+    fprintf(out, "\n--- found %d ---\n", found);
+}
 static int rpc_scan(FILE *out, const char *imagePattern, const char *classPattern, bool dumpAllInMatchedImage) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) return -1;
@@ -725,6 +797,16 @@ static void rpc_handle(const char *cmd, FILE *out) {
         char cls[256] = {0};
         if (sscanf(cmd + 8, "%255s", cls) == 1) rpc_dump_methods(out, cls);
         else fprintf(out, "ERR: usage: methods <ClassName>\n");
+    }
+    else if (strncmp(cmd, "liststatic ", 11) == 0) {
+        char cls[256] = {0};
+        if (sscanf(cmd + 11, "%255s", cls) == 1) rpc_list_static(out, cls);
+        else fprintf(out, "ERR: usage: liststatic <ClassName>\n");
+    }
+    else if (strncmp(cmd, "getstatic ", 10) == 0) {
+        char cls[256] = {0}, fld[128] = {0};
+        if (sscanf(cmd + 10, "%255s %127s", cls, fld) == 2) rpc_get_static(out, cls, fld);
+        else fprintf(out, "ERR: usage: getstatic <ClassName> <FieldName>\n");
     }
     else if (strncmp(cmd, "hook ", 5) == 0) {
         uint64_t addr = 0;

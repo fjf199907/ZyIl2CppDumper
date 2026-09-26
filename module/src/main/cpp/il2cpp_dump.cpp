@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -979,6 +980,94 @@ static void rpc_get_static(FILE *out, const char *cls, const char *fldname) {
     }
     fprintf(out, "\n--- found %d ---\n", found);
 }
+
+static bool rpc_read_pointer(uint64_t address, uint64_t *value) {
+    iovec local{value, sizeof(*value)};
+    iovec remote{reinterpret_cast<void *>(address), sizeof(*value)};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == sizeof(*value);
+}
+
+static void rpc_static_refs(FILE *out, const char *image_filter, const char *target_name) {
+    if (!il2cpp_class_get_static_field_data || !il2cpp_type_get_type ||
+        !il2cpp_class_from_type || !il2cpp_class_is_valuetype || !il2cpp_field_get_flags ||
+        !g_rpc_api.field_get_offset || !g_rpc_api.field_get_type) {
+        fprintf(out, "ERR: required IL2CPP field APIs unavailable\n"); return;
+    }
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) { fprintf(out, "ERR: IL2CPP domain unavailable\n"); return; }
+    size_t asm_count = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asm_count);
+    void *target = nullptr;
+    void *image = nullptr;
+    if (!assemblies) { fprintf(out, "ERR: assemblies unavailable\n"); return; }
+    for (size_t i = 0; i < asm_count; ++i) {
+        void *candidate = g_rpc_api.assembly_get_image(assemblies[i]);
+        const char *image_name = candidate && g_rpc_api.image_get_name
+            ? g_rpc_api.image_get_name(candidate) : nullptr;
+        if (!image_name || strcmp(image_name, image_filter) != 0) continue;
+        image = candidate;
+        break;
+    }
+    if (!image) { fprintf(out, "ERR: image not found: %s\n", image_filter); return; }
+    const size_t class_count = g_rpc_api.image_get_class_count(image);
+    for (size_t i = 0; i < class_count; ++i) {
+        void *klass = g_rpc_api.image_get_class(image, i);
+        if (!klass) continue;
+        const char *name = g_rpc_api.class_get_name(klass);
+        const char *ns = g_rpc_api.class_get_namespace(klass);
+        char full[512];
+        snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name ? name : "");
+        if (strcmp(full, target_name) == 0 || (name && strcmp(name, target_name) == 0)) {
+            target = klass;
+            break;
+        }
+    }
+    if (!target) { fprintf(out, "ERR: target class not found in %s\n", image_filter); return; }
+
+    int checked = 0, found = 0, unreadable = 0, skipped = 0;
+    for (size_t i = 0; i < class_count; ++i) {
+        void *owner = g_rpc_api.image_get_class(image, i);
+        if (!owner) continue;
+        auto *storage = il2cpp_class_get_static_field_data((Il2CppClass *)owner);
+        if (!storage) continue;
+        void *iter = nullptr;
+        while (auto field = g_rpc_api.class_get_fields(owner, &iter)) {
+            const auto flags = il2cpp_field_get_flags(field);
+            if (!(flags & FIELD_ATTRIBUTE_STATIC) || (flags & FIELD_ATTRIBUTE_LITERAL)) continue;
+            const size_t offset = g_rpc_api.field_get_offset(field);
+            // Thread statics use a sentinel offset; bound regular static storage offsets.
+            if (offset > 16 * 1024 * 1024) { ++skipped; continue; }
+            const Il2CppType *type = (const Il2CppType *)g_rpc_api.field_get_type(field);
+            if (!type) continue;
+            const int kind = il2cpp_type_get_type(type);
+            if (kind != IL2CPP_TYPE_CLASS && kind != IL2CPP_TYPE_OBJECT &&
+                kind != IL2CPP_TYPE_GENERICINST) continue;
+            if (kind == IL2CPP_TYPE_GENERICINST) {
+                auto *field_class = il2cpp_class_from_type(type);
+                if (!field_class || il2cpp_class_is_valuetype(field_class)) continue;
+            }
+            if (checked >= 8192) {
+                fprintf(out, "ERR: static reference budget exhausted; results incomplete\n");
+                fprintf(out, "staticrefs=%d checked=%d incomplete=1\n", found, checked);
+                return;
+            }
+            uint64_t object = 0, object_class = 0;
+            ++checked;
+            // Read existing slots without Field::StaticGetValue or managed class constructors.
+            if (!rpc_read_pointer((uint64_t)storage + offset, &object)) { ++unreadable; continue; }
+            if (!object) continue;
+            if (!rpc_read_pointer(object, &object_class)) { ++unreadable; continue; }
+            if (object_class != (uint64_t)target) continue;
+            const char *owner_name = g_rpc_api.class_get_name(owner);
+            const char *field_name = g_rpc_api.field_get_name(field);
+            fprintf(out, "%s.%s -> 0x%" PRIx64 "\n", owner_name ? owner_name : "?",
+                    field_name ? field_name : "?", object);
+            ++found;
+        }
+    }
+    fprintf(out, "staticrefs=%d checked=%d unreadable=%d skipped=%d target=%s image=%s\n",
+            found, checked, unreadable, skipped, target_name, image_filter);
+}
 static int rpc_scan(FILE *out, const char *imagePattern, const char *classPattern, bool dumpAllInMatchedImage) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) return -1;
@@ -1104,6 +1193,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
         char cls[256] = {0}, fld[128] = {0};
         if (sscanf(cmd + 10, "%255s %127s", cls, fld) == 2) rpc_get_static(out, cls, fld);
         else fprintf(out, "ERR: usage: getstatic <ClassName> <FieldName>\n");
+    }
+    else if (strncmp(cmd, "staticrefs ", 11) == 0) {
+        char image[128], target[256];
+        if (sscanf(cmd + 11, "%127s %255s", image, target) == 2)
+            rpc_static_refs(out, image, target);
+        else fprintf(out, "ERR: usage: staticrefs <image.dll> <FullClassName>\n");
     }
     else if (strncmp(cmd, "hook ", 5) == 0) {
         uint64_t addr = 0;
@@ -1259,6 +1354,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
                      "      class <name> | instances/liveinstances (disabled: unsafe discovery)\n"
                      "      healthdump <addr> [limit] | methods <name>\n"
+                     "      staticrefs <image.dll> <FullClassName>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

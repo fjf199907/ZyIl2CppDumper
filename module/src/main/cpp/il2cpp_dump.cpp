@@ -1127,6 +1127,59 @@ static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single
     fprintf(out, "Direct declared fields only; generic/inline/inherited fields are not traversed.\n");
 }
 
+// Resolve instantiated metadata from a concrete owner's field, never from a
+// caller-supplied class pointer. No object data or managed methods are touched.
+static void rpc_field_layout(FILE *out, const char *owner_name, const char *field_name) {
+    if (!il2cpp_class_from_type || !il2cpp_class_is_valuetype ||
+        !il2cpp_class_value_size || !il2cpp_class_instance_size ||
+        !il2cpp_class_get_fields || !il2cpp_field_get_type || !il2cpp_field_get_flags ||
+        !il2cpp_type_get_type) {
+        fprintf(out, "ERR: required layout APIs unavailable\n"); return;
+    }
+    auto *owner = (Il2CppClass *)rpc_find_class(owner_name);
+    if (!owner) { fprintf(out, "ERR: owner class not found\n"); return; }
+    void *iter = nullptr;
+    unsigned visited = 0;
+    while (auto *field = il2cpp_class_get_fields(owner, &iter)) {
+        if (++visited > 512) { fprintf(out, "ERR: owner field budget exceeded\n"); return; }
+        const char *name = g_rpc_api.field_get_name(field);
+        if (!name || strcmp(name, field_name) != 0) continue;
+        const auto *type = il2cpp_field_get_type(field);
+        auto *concrete = type ? il2cpp_class_from_type(type) : nullptr;
+        if (!concrete) { fprintf(out, "ERR: field class unavailable\n"); return; }
+        const bool value = il2cpp_class_is_valuetype(concrete);
+        uint32_t alignment = 0;
+        const int32_t size = value ? il2cpp_class_value_size(concrete, &alignment)
+                                   : il2cpp_class_instance_size(concrete);
+        fprintf(out, "fieldlayout owner=%s field=%s offset=0x%zx klass=0x%" PRIx64
+                     " valuetype=%d size=%d alignment=%u static=%d\n",
+                owner_name, field_name, g_rpc_api.field_get_offset(field), (uint64_t)concrete,
+                value ? 1 : 0, size, alignment,
+                (il2cpp_field_get_flags(field) & FIELD_ATTRIBUTE_STATIC) ? 1 : 0);
+        if (il2cpp_type_get_name && il2cpp_free) {
+            char *full = il2cpp_type_get_name(type);
+            fprintf(out, "field_type=%s\n", full ? full : "?");
+            if (full) il2cpp_free(full);
+        }
+        if (size <= 0 || size > 1048576) {
+            fprintf(out, "ERR: invalid/unresolved type size; do not use offsets\n"); return;
+        }
+        void *child_iter = nullptr;
+        unsigned total = 0;
+        while (auto *child = il2cpp_class_get_fields(concrete, &child_iter)) {
+            if (++total > 128) { fprintf(out, "fields truncated at 128\n"); break; }
+            if (il2cpp_field_get_flags(child) & FIELD_ATTRIBUTE_STATIC) continue;
+            const char *cn = g_rpc_api.field_get_name(child);
+            const auto *ct = il2cpp_field_get_type(child);
+            fprintf(out, "  field %s raw_offset=0x%zx kind=0x%x\n", cn ? cn : "?",
+                    g_rpc_api.field_get_offset(child), ct ? il2cpp_type_get_type(ct) : 0);
+        }
+        fprintf(out, "Raw runtime offsets only; validate boxed/unboxed convention before reading inline data.\n");
+        return;
+    }
+    fprintf(out, "ERR: field not found\n");
+}
+
 static void rpc_static_refs(FILE *out, const char *image_filter, const char *target_name) {
     if (!il2cpp_class_get_static_field_data || !il2cpp_type_get_type ||
         !il2cpp_class_from_type || !il2cpp_class_is_valuetype || !il2cpp_field_get_flags ||
@@ -1253,7 +1306,8 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strcmp(cmd, "rpcinfo") == 0) {
         fprintf(out, "protocol=2 build=majo-readonly-diag-20260927-v1 compiled=%s %s pid=%d ptrsize=%zu\n",
                 __DATE__, __TIME__, getpid(), sizeof(uintptr_t));
-        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs\n");
+        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs,fieldlayout\n");
+        fprintf(out, "diagnostic_revision=2\n");
         fprintf(out, "limits: read_bytes=4096 task_slots=64 task_fields=128 metadata_classes=250000\n");
     }
     else if (strcmp(cmd, "base") == 0) {
@@ -1339,6 +1393,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
         char cls[256] = {0}, fld[128] = {0};
         if (sscanf(cmd + 10, "%255s %127s", cls, fld) == 2) rpc_get_static(out, cls, fld);
         else fprintf(out, "ERR: usage: getstatic <ClassName> <FieldName>\n");
+    }
+    else if (strncmp(cmd, "fieldlayout ", 12) == 0) {
+        char owner[256] = {}, field[128] = {}, extra;
+        if (sscanf(cmd + 12, "%255s %127s %c", owner, field, &extra) == 2)
+            rpc_field_layout(out, owner, field);
+        else fprintf(out, "ERR: usage: fieldlayout <OwnerClass> <FieldName>\n");
     }
     else if (strncmp(cmd, "objrefs ", 8) == 0) {
         uint64_t object = 0;
@@ -1528,6 +1588,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      staticrefs <image.dll> <FullClassName>\n"
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
                      "      rpcinfo | objrefs <object_addr_hex>\n"
+                     "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

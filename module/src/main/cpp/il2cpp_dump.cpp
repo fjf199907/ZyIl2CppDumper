@@ -560,6 +560,19 @@ static void *rpc_find_class(const char *className, void **outImage = nullptr) {
     return nullptr;
 }
 
+static bool rpc_field_offset(void *klass, const char *fieldName, size_t *outOffset) {
+    if (!klass || !fieldName || !outOffset) return false;
+    void *iter = nullptr;
+    while (auto field = g_rpc_api.class_get_fields(klass, &iter)) {
+        const char *name = g_rpc_api.field_get_name(field);
+        if (name && strcmp(name, fieldName) == 0) {
+            *outOffset = g_rpc_api.field_get_offset(field);
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
     if (!klass) return false;
     if (limit <= 0 || limit > 256) limit = 32;
@@ -616,6 +629,81 @@ static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
     return found > 0;
 }
 
+struct RpcLivenessResult {
+    void *filter;
+    int limit;
+    std::vector<uint64_t> objects;
+};
+
+static void rpc_liveness_object_callback(
+        Il2CppObject **objects, int size, void *userdata) {
+    auto *result = (RpcLivenessResult *)userdata;
+    if (!result || !objects || size <= 0) return;
+    for (int i = 0; i < size && (int)result->objects.size() < result->limit; ++i) {
+        Il2CppObject *object = objects[i];
+        if (!object || object->klass != result->filter) continue;
+        uint64_t addr = (uint64_t)(uintptr_t)object;
+        if (std::find(result->objects.begin(), result->objects.end(), addr)
+                == result->objects.end()) {
+            result->objects.push_back(addr);
+        }
+    }
+}
+
+static void *rpc_liveness_reallocate(
+        void *ptr, size_t size, void *userdata) {
+    (void)userdata;
+    return realloc(ptr, size);
+}
+
+static bool rpc_live_instances(FILE *out, void *klass, int limit) {
+    if (!klass) return false;
+    if (limit <= 0 || limit > 256) limit = 32;
+    if (!il2cpp_unity_liveness_allocate_struct ||
+        !il2cpp_unity_liveness_calculation_from_statics ||
+        !il2cpp_unity_liveness_finalize ||
+        !il2cpp_unity_liveness_free_struct) {
+        fprintf(out, "ERR: IL2CPP liveness API unavailable\n");
+        return false;
+    }
+
+    Il2CppThread *attached = nullptr;
+    if (il2cpp_thread_current && il2cpp_thread_attach &&
+        !il2cpp_thread_current()) {
+        attached = il2cpp_thread_attach(
+                (Il2CppDomain *)g_rpc_api.domain_get());
+    }
+
+    RpcLivenessResult result{};
+    result.filter = klass;
+    result.limit = limit;
+    void *state = il2cpp_unity_liveness_allocate_struct(
+            (Il2CppClass *)klass,
+            limit,
+            rpc_liveness_object_callback,
+            &result,
+            rpc_liveness_reallocate);
+    if (!state) {
+        if (attached && il2cpp_thread_detach) il2cpp_thread_detach(attached);
+        fprintf(out, "ERR: liveness state allocation failed\n");
+        return false;
+    }
+
+    il2cpp_unity_liveness_calculation_from_statics(state);
+    il2cpp_unity_liveness_finalize(state);
+    il2cpp_unity_liveness_free_struct(state);
+
+    if (attached && il2cpp_thread_detach) il2cpp_thread_detach(attached);
+
+    for (uint64_t object : result.objects) {
+        fprintf(out, "instance 0x%" PRIx64 " klass=0x%" PRIx64 "\n",
+                object, (uint64_t)(uintptr_t)klass);
+    }
+    fprintf(out, "instances=%zu source=il2cpp_liveness\n",
+            result.objects.size());
+    return !result.objects.empty();
+}
+
 static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
     if (limit <= 0 || limit > 4096) limit = 512;
     if (service < 0x100000000ULL || service > 0x800000000000ULL) {
@@ -646,46 +734,74 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
         return false;
     }
 
-    // EcsPool<T> reference-type fields on arm64 IL2CPP:
-    //   +0x38 _denseItems, +0x40 _sparseItems, +0x48 _denseItemsCount.
+    // Resolve the concrete inflated generic class from the live object's
+    // klass pointer. The generic definition reported by `class EcsPool` can
+    // expose zero offsets, while the inflated runtime class has real offsets.
+    uint64_t poolKlass = 0;
+    memcpy(&poolKlass, (void *)pool, sizeof(poolKlass));
+    size_t denseOff = 0x38;
+    size_t sparseOff = 0x40;
+    size_t countOff = 0x48;
+    bool dynamicLayout = false;
+    if (poolKlass >= 0x100000000ULL && poolKlass <= 0x800000000000ULL) {
+        size_t d = 0, s = 0, c = 0;
+        if (rpc_field_offset((void *)(uintptr_t)poolKlass, "_denseItems", &d) &&
+            rpc_field_offset((void *)(uintptr_t)poolKlass, "_sparseItems", &s) &&
+            rpc_field_offset((void *)(uintptr_t)poolKlass, "_denseItemsCount", &c) &&
+            d < 0x200 && s < 0x200 && c < 0x200) {
+            denseOff = d;
+            sparseOff = s;
+            countOff = c;
+            dynamicLayout = true;
+        }
+    }
+
     uint64_t dense = 0;
     uint64_t sparse = 0;
     int32_t denseCount = 0;
-    memcpy(&dense, (void *)(pool + 0x38), sizeof(dense));
-    memcpy(&sparse, (void *)(pool + 0x40), sizeof(sparse));
-    memcpy(&denseCount, (void *)(pool + 0x48), sizeof(denseCount));
+    memcpy(&dense, (void *)(pool + denseOff), sizeof(dense));
+    memcpy(&sparse, (void *)(pool + sparseOff), sizeof(sparse));
+    memcpy(&denseCount, (void *)(pool + countOff), sizeof(denseCount));
     if (dense < 0x100000000ULL || dense > 0x800000000000ULL ||
         sparse < 0x100000000ULL || sparse > 0x800000000000ULL ||
         denseCount < 0 || denseCount > 1000000) {
         g_dump_guard_active = 0;
         remove_dump_guard();
         fprintf(out, "ERR: unexpected EcsPool layout pool=0x%" PRIx64
+                     " klass=0x%" PRIx64 " denseOff=0x%zx sparseOff=0x%zx countOff=0x%zx"
                      " dense=0x%" PRIx64 " sparse=0x%" PRIx64 " count=%d\n",
-                pool, dense, sparse, denseCount);
+                pool, poolKlass, denseOff, sparseOff, countOff, dense, sparse, denseCount);
         return false;
     }
 
     uint64_t sparseLen = 0;
+    // Il2CppArray::max_length is at +0x18 on this arm64 runtime.
     memcpy(&sparseLen, (void *)(sparse + 0x18), sizeof(sparseLen));
     if (sparseLen > 1000000) sparseLen = 1000000;
     fprintf(out, "world=0x%" PRIx64 " pool=0x%" PRIx64
                  " dense=0x%" PRIx64 " sparse=0x%" PRIx64
-                 " denseCount=%d sparseLen=%" PRIu64 "\n",
-            world, pool, dense, sparse, denseCount, sparseLen);
+                 " denseCount=%d sparseLen=%" PRIu64
+                 " layout=%s offsets=(0x%zx,0x%zx,0x%zx)\n",
+            world, pool, dense, sparse, denseCount, sparseLen,
+            dynamicLayout ? "runtime" : "fallback", denseOff, sparseOff, countOff);
 
     int shown = 0;
     for (uint64_t entity = 0; entity < sparseLen && shown < limit; ++entity) {
         int32_t denseIndex = -1;
         memcpy(&denseIndex, (void *)(sparse + 0x20 + entity * sizeof(int32_t)), sizeof(denseIndex));
-        if (denseIndex < 0 || denseIndex >= denseCount) continue;
+        // LeoEcsLite reserves dense slot 0 as the "component absent" sentinel.
+        // Real components occupy slots [1, denseCount).
+        if (denseIndex <= 0 || denseIndex >= denseCount) continue;
 
         uint64_t item = dense + 0x20 + (uint64_t)denseIndex * 0x18;
         int64_t value = 0;
         int64_t maxValue = 0;
         memcpy(&value, (void *)item, sizeof(value));
         memcpy(&maxValue, (void *)(item + 0x08), sizeof(maxValue));
-        fprintf(out, "entity=%" PRIu64 " dense=%d value=%" PRId64 " max=%" PRId64 "\n",
-                entity, denseIndex, value, maxValue);
+        double ratio = maxValue > 0 ? (double)value * 100.0 / (double)maxValue : 0.0;
+        fprintf(out, "entity=%" PRIu64 " dense=%d value=%" PRId64
+                     " max=%" PRId64 " ratio=%.2f%%\n",
+                entity, denseIndex, value, maxValue, ratio);
         ++shown;
     }
 
@@ -959,19 +1075,22 @@ static void rpc_handle(const char *cmd, FILE *out) {
         }
     }
     else if (strncmp(cmd, "instances ", 10) == 0) {
+        fprintf(out, "ERR: instances disabled; use liveinstances <ClassName> [limit]\n");
+    }
+    else if (strncmp(cmd, "liveinstances ", 14) == 0) {
         char cls[256] = {0};
         int limit = 32;
-        int n = sscanf(cmd + 10, "%255s %d", cls, &limit);
+        int n = sscanf(cmd + 14, "%255s %d", cls, &limit);
         if (n >= 1) {
             void *klass = rpc_find_class(cls);
             if (!klass) {
                 fprintf(out, "ERR: class not found: %s\n", cls);
             } else {
                 fprintf(out, "class=%s klass=0x%" PRIx64 "\n", cls, (uint64_t)(uintptr_t)klass);
-                rpc_scan_rw_instances(out, klass, limit);
+                rpc_live_instances(out, klass, limit);
             }
         } else {
-            fprintf(out, "ERR: usage: instances <ClassName> [limit]\n");
+            fprintf(out, "ERR: usage: liveinstances <ClassName> [limit]\n");
         }
     }
     else if (strncmp(cmd, "healthdump ", 11) == 0) {
@@ -1151,7 +1270,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else {
         fprintf(out, "ERR: unknown cmd\n");
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
-                     "      class <name> | instances <name> [limit] | healthdump <addr> [limit] | methods <name>\n"
+                     "      class <name> | liveinstances <name> [limit] | healthdump <addr> [limit] | methods <name>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

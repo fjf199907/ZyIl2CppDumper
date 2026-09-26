@@ -981,10 +981,150 @@ static void rpc_get_static(FILE *out, const char *cls, const char *fldname) {
     fprintf(out, "\n--- found %d ---\n", found);
 }
 
+static bool rpc_read_exact(uint64_t address, void *value, size_t size) {
+    if (!address || !size || address > UINTPTR_MAX || size - 1 > UINTPTR_MAX - address) {
+        errno = EFAULT;
+        return false;
+    }
+    iovec local{value, size};
+    iovec remote{reinterpret_cast<void *>(static_cast<uintptr_t>(address)), size};
+    ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+    if (got == static_cast<ssize_t>(size)) return true;
+    if (got >= 0) errno = EFAULT; // Partial reads are not complete snapshots.
+    return false;
+}
+
 static bool rpc_read_pointer(uint64_t address, uint64_t *value) {
-    iovec local{value, sizeof(*value)};
-    iovec remote{reinterpret_cast<void *>(address), sizeof(*value)};
-    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == sizeof(*value);
+    uintptr_t pointer = 0;
+    if (!rpc_read_exact(address, &pointer, sizeof(pointer))) return false;
+    *value = pointer;
+    return true;
+}
+
+static bool rpc_read_checked(FILE *out, uint64_t address, void *value, size_t size) {
+    if (rpc_read_exact(address, value, size)) return true;
+    const int error = errno;
+    fprintf(out, "ERR: read failed at 0x%" PRIx64 " size=%zu errno=%d (%s)\n",
+            address, size, error, strerror(error));
+    return false;
+}
+
+// Inspect only caller-selected array slots and direct fields of metadata-known classes.
+// Unknown/inflated class pointers are never passed to IL2CPP class APIs.
+static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single = false) {
+    if (sizeof(uintptr_t) != 8) {
+        fprintf(out, "ERR: taskrefs currently requires ARM64/x64 array layout\n"); return;
+    }
+    if (!array || array > UINTPTR_MAX - 0x220 || count == 0 || count > 64) {
+        fprintf(out, "ERR: taskrefs requires valid array address and count 1..64\n"); return;
+    }
+    if (!il2cpp_field_get_flags || !il2cpp_type_get_type || !il2cpp_field_get_type ||
+        !il2cpp_class_get_fields || !il2cpp_class_get_name || !il2cpp_class_get_namespace) {
+        fprintf(out, "ERR: required metadata APIs unavailable\n"); return;
+    }
+    uint64_t header[4] = {};
+    uint64_t slots[64] = {};
+    if (single) {
+        count = 1;
+        slots[0] = array;
+    } else {
+        if (!rpc_read_checked(out, array, header, sizeof(header))) return;
+        if (!header[0] || header[2] != 0 || header[3] > 1048576 || count > header[3]) {
+            fprintf(out, "ERR: invalid vector header or count exceeds capacity\n"); return;
+        }
+        if (!rpc_read_checked(out, array + 0x20, slots, count * sizeof(uint64_t))) return;
+    }
+    if (single) fprintf(out, "objrefs object=0x%" PRIx64 "\n", array);
+    else
+    fprintf(out, "taskrefs array=0x%" PRIx64 " capacity=%" PRIu64
+                 " requested=%u (caller-supplied array; non-atomic snapshot)\n",
+            array, header[3], count);
+
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) { fprintf(out, "ERR: domain unavailable\n"); return; }
+    size_t assembly_count = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &assembly_count);
+    if (!assemblies) { fprintf(out, "ERR: assemblies unavailable\n"); return; }
+    std::vector<uint64_t> known;
+    size_t visited = 0;
+    for (size_t a = 0; a < assembly_count; ++a) {
+        void *img = g_rpc_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        const size_t n = g_rpc_api.image_get_class_count(img);
+        for (size_t c = 0; c < n; ++c) {
+            if (++visited > 250000) {
+                fprintf(out, "ERR: metadata budget exceeded; inspection incomplete\n"); return;
+            }
+            void *klass = g_rpc_api.image_get_class(img, c);
+            if (klass) known.push_back((uint64_t)klass);
+        }
+    }
+    std::sort(known.begin(), known.end());
+    unsigned matched = 0, unknown = 0, empty = 0, failed = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        uint64_t obj = slots[i], klass = 0;
+        fprintf(out, "[%u] object=0x%" PRIx64, i, obj);
+        if (!obj) { ++empty; fprintf(out, " empty\n"); continue; }
+        if (!rpc_read_pointer(obj, &klass)) {
+            ++failed; fprintf(out, " unreadable\n"); continue;
+        }
+        fprintf(out, " klass=0x%" PRIx64, klass);
+        if (!std::binary_search(known.begin(), known.end(), klass)) {
+            ++unknown;
+            fprintf(out, " type=UNKNOWN (not enumerated; possible inflated generic)\n");
+            continue;
+        }
+        ++matched;
+        auto *type_class = (Il2CppClass *)klass;
+        const char *ns = il2cpp_class_get_namespace(type_class);
+        const char *name = il2cpp_class_get_name(type_class);
+        fprintf(out, " type=%s%s%s\n", ns ? ns : "", ns && *ns ? "." : "", name ? name : "?");
+        void *iter = nullptr;
+        unsigned fields = 0;
+        while (auto *field = il2cpp_class_get_fields(type_class, &iter)) {
+            if (++fields > 128) { fprintf(out, "  fields truncated at 128\n"); break; }
+            const int flags = il2cpp_field_get_flags(field);
+            if (flags & (FIELD_ATTRIBUTE_STATIC | FIELD_ATTRIBUTE_LITERAL)) continue;
+            const size_t offset = g_rpc_api.field_get_offset(field);
+            const char *fn = g_rpc_api.field_get_name(field);
+            const auto *ft = il2cpp_field_get_type(field);
+            if (!ft) continue;
+            const int kind = il2cpp_type_get_type(ft);
+            fprintf(out, "  +0x%zx %s kind=0x%x", offset, fn ? fn : "?", kind);
+            // Generic fields might be inline structs: report without guessing layout.
+            const bool ref = kind == IL2CPP_TYPE_CLASS || kind == IL2CPP_TYPE_OBJECT ||
+                             kind == IL2CPP_TYPE_STRING || kind == IL2CPP_TYPE_SZARRAY ||
+                             kind == IL2CPP_TYPE_ARRAY;
+            if (!ref) { fprintf(out, " (not followed; value/generic field)\n"); continue; }
+            if (offset < 0x10 || offset > 65536 || obj > UINTPTR_MAX - offset) {
+                fprintf(out, " invalid offset\n"); continue;
+            }
+            uint64_t value = 0, child_class = 0;
+            if (!rpc_read_pointer(obj + offset, &value)) {
+                fprintf(out, " unreadable\n"); continue;
+            }
+            fprintf(out, " -> 0x%" PRIx64, value);
+            if (value && rpc_read_pointer(value, &child_class) &&
+                std::binary_search(known.begin(), known.end(), child_class)) {
+                auto *child = (Il2CppClass *)child_class;
+                const char *cn = il2cpp_class_get_name(child);
+                const char *cns = il2cpp_class_get_namespace(child);
+                fprintf(out, " type=%s%s%s", cns ? cns : "", cns && *cns ? "." : "", cn ? cn : "?");
+            } else if (value) fprintf(out, " type=UNKNOWN_OR_UNREADABLE");
+            fprintf(out, "\n");
+        }
+        uint64_t after = 0;
+        if (!rpc_read_pointer(obj, &after) || after != klass)
+            fprintf(out, "  WARNING: object header changed/unreadable; discard fields\n");
+    }
+    uint64_t after_header[4] = {}, after_slots[64] = {};
+    const bool changed = !single && (!rpc_read_exact(array, after_header, sizeof(after_header)) ||
+        memcmp(header, after_header, sizeof(header)) != 0 ||
+        !rpc_read_exact(array + 0x20, after_slots, count * sizeof(uint64_t)) ||
+        memcmp(slots, after_slots, count * sizeof(uint64_t)) != 0);
+    fprintf(out, "matched=%u unknown=%u empty=%u unreadable=%u changed=%d\n",
+            matched, unknown, empty, failed, changed ? 1 : 0);
+    fprintf(out, "Direct declared fields only; generic/inline/inherited fields are not traversed.\n");
 }
 
 static void rpc_static_refs(FILE *out, const char *image_filter, const char *target_name) {
@@ -1110,6 +1250,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
     if (strcmp(cmd, "ping") == 0) {
         fprintf(out, "pong\n");
     }
+    else if (strcmp(cmd, "rpcinfo") == 0) {
+        fprintf(out, "protocol=2 build=majo-readonly-diag-20260927-v1 compiled=%s %s pid=%d ptrsize=%zu\n",
+                __DATE__, __TIME__, getpid(), sizeof(uintptr_t));
+        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs\n");
+        fprintf(out, "limits: read_bytes=4096 task_slots=64 task_fields=128 metadata_classes=250000\n");
+    }
     else if (strcmp(cmd, "base") == 0) {
         fprintf(out, "il2cpp_base=0x%" PRIx64 "\n", il2cpp_base);
     }
@@ -1193,6 +1339,21 @@ static void rpc_handle(const char *cmd, FILE *out) {
         char cls[256] = {0}, fld[128] = {0};
         if (sscanf(cmd + 10, "%255s %127s", cls, fld) == 2) rpc_get_static(out, cls, fld);
         else fprintf(out, "ERR: usage: getstatic <ClassName> <FieldName>\n");
+    }
+    else if (strncmp(cmd, "objrefs ", 8) == 0) {
+        uint64_t object = 0;
+        char extra;
+        if (sscanf(cmd + 8, "%" SCNx64 " %c", &object, &extra) == 1)
+            rpc_task_refs(out, object, 1, true);
+        else fprintf(out, "ERR: usage: objrefs <object_addr_hex>\n");
+    }
+    else if (strncmp(cmd, "taskrefs ", 9) == 0) {
+        uint64_t array = 0;
+        unsigned count = 0;
+        char extra;
+        if (sscanf(cmd + 9, "%" SCNx64 " %u %c", &array, &count, &extra) == 2)
+            rpc_task_refs(out, array, count);
+        else fprintf(out, "ERR: usage: taskrefs <array_addr_hex> <count:1..64>\n");
     }
     else if (strncmp(cmd, "staticrefs ", 11) == 0) {
         char image[128], target[256];
@@ -1278,8 +1439,10 @@ static void rpc_handle(const char *cmd, FILE *out) {
     }
     else if (strncmp(cmd, "read ", 5) == 0) {
         uint64_t addr = 0; int size = 0;
-        if (sscanf(cmd + 5, "%" SCNx64 " %d", &addr, &size) == 2 && size > 0 && size <= 4096) {
-            uint8_t *p = (uint8_t *)addr;
+        if (sscanf(cmd + 5, "%" SCNx64 " %i", &addr, &size) == 2 && size > 0 && size <= 4096) {
+            uint8_t buffer[4096];
+            if (!rpc_read_checked(out, addr, buffer, static_cast<size_t>(size))) return;
+            const uint8_t *p = buffer;
             for (int i = 0; i < size; i += 16) {
                 fprintf(out, "%016" PRIx64 "  ", addr + i);
                 for (int k = 0; k < 16 && i + k < size; ++k) fprintf(out, "%02x ", p[i + k]);
@@ -1310,21 +1473,24 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strncmp(cmd, "readf ", 6) == 0) {
         uint64_t addr = 0;
         if (sscanf(cmd + 6, "%" SCNx64, &addr) == 1) {
-            float f; memcpy(&f, (void*)addr, 4);
+            float f;
+            if (!rpc_read_checked(out, addr, &f, sizeof(f))) return;
             fprintf(out, "float @0x%" PRIx64 " = %f\n", addr, f);
         }
     }
     else if (strncmp(cmd, "readi ", 6) == 0) {
         uint64_t addr = 0;
         if (sscanf(cmd + 6, "%" SCNx64, &addr) == 1) {
-            int32_t v; memcpy(&v, (void*)addr, 4);
+            int32_t v;
+            if (!rpc_read_checked(out, addr, &v, sizeof(v))) return;
             fprintf(out, "int32 @0x%" PRIx64 " = %d\n", addr, v);
         }
     }
     else if (strncmp(cmd, "readu64 ", 8) == 0) {
         uint64_t addr = 0;
         if (sscanf(cmd + 8, "%" SCNx64, &addr) == 1) {
-            uint64_t v; memcpy(&v, (void*)addr, 8);
+            uint64_t v;
+            if (!rpc_read_checked(out, addr, &v, sizeof(v))) return;
             fprintf(out, "uint64 @0x%" PRIx64 " = 0x%" PRIx64 "\n", addr, v);
         }
     }
@@ -1334,9 +1500,14 @@ static void rpc_handle(const char *cmd, FILE *out) {
         int n = sscanf(cmd + 8, "%" SCNx64 " %d", &addr, &maxLen);
         if (n >= 1) {
             if (maxLen <= 0 || maxLen > 4096) maxLen = 256;
-            const char *p = (const char *)addr;
+            char buffer[4096];
+            const char *p = buffer;
             int len = 0;
             for (; len < maxLen; ++len) {
+                if (addr > UINT64_MAX - static_cast<uint64_t>(len)) {
+                    fprintf(out, "ERR: string address overflow\n"); return;
+                }
+                if (!rpc_read_checked(out, addr + len, &buffer[len], 1)) return;
                 if (p[len] == '\0') break;
             }
             fprintf(out, "str @0x%" PRIx64 " = \"", addr);
@@ -1355,6 +1526,8 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      class <name> | instances/liveinstances (disabled: unsafe discovery)\n"
                      "      healthdump <addr> [limit] | methods <name>\n"
                      "      staticrefs <image.dll> <FullClassName>\n"
+                     "      taskrefs <array_addr_hex> <count:1..64>\n"
+                     "      rpcinfo | objrefs <object_addr_hex>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

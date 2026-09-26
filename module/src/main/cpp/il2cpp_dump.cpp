@@ -12,6 +12,7 @@
 #include <vector>
 #include <sstream>
 #include <fstream>
+#include <algorithm>
 #include <unistd.h>
 #include <link.h>
 #include <csetjmp>
@@ -528,6 +529,172 @@ struct HealthScanApi {
     void* (*class_from_type)(void*);
 };
 
+static HealthScanApi g_rpc_api;
+static bool g_rpc_api_ok = false;
+
+static void *rpc_find_class(const char *className, void **outImage = nullptr) {
+    if (outImage) *outImage = nullptr;
+    if (!className || !*className) return nullptr;
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) return nullptr;
+    size_t asmCount = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asmCount);
+    if (!assemblies) return nullptr;
+    for (size_t i = 0; i < asmCount; ++i) {
+        void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        size_t classCount = g_rpc_api.image_get_class_count(image);
+        for (size_t j = 0; j < classCount; ++j) {
+            void *klass = g_rpc_api.image_get_class(image, j);
+            if (!klass) continue;
+            const char *name = g_rpc_api.class_get_name(klass);
+            const char *ns = g_rpc_api.class_get_namespace(klass);
+            char full[512] = {0};
+            snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name ? name : "");
+            if (strcmp(className, name ? name : "") == 0 || strcmp(className, full) == 0) {
+                if (outImage) *outImage = image;
+                return klass;
+            }
+        }
+    }
+    return nullptr;
+}
+
+static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
+    if (!klass) return false;
+    if (limit <= 0 || limit > 256) limit = 32;
+
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        fprintf(out, "ERR: cannot open /proc/self/maps\n");
+        return false;
+    }
+
+    // This scan is read-only. Mappings can disappear during Unity GC, so use
+    // the existing SIGSEGV/SIGBUS guard for the RPC thread.
+    install_dump_guard();
+    g_dump_guard_active = 1;
+
+    uint64_t target = (uint64_t)(uintptr_t)klass;
+    char line[1024];
+    int found = 0;
+    while (fgets(line, sizeof(line), maps) && found < limit) {
+        uint64_t start = 0, end = 0;
+        char perms[8] = {0};
+        char path[512] = {0};
+        int n = sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %*s %*s %*s %511[^\n]",
+                       &start, &end, perms, path);
+        if (n < 3 || end <= start) continue;
+        // Managed objects normally live in writable private mappings.
+        if (perms[0] != 'r' || perms[1] != 'w' || perms[3] != 'p') continue;
+        if (n >= 4 && (strstr(path, "[stack") || strstr(path, "[vdso") || strstr(path, "[vvar"))) continue;
+        uint64_t size = end - start;
+        if (size == 0 || size > 512ull * 1024ull * 1024ull) continue;
+
+        const size_t chunkSize = 1u << 20;
+        for (uint64_t off = 0; off + sizeof(uint64_t) <= size && found < limit; ) {
+            size_t want = (size_t)std::min<uint64_t>(chunkSize, size - off);
+            if (sigsetjmp(g_dump_jmp, 1) != 0) break;
+            const uint8_t *buf = (const uint8_t *)(start + off);
+            for (size_t i = 0; i + sizeof(uint64_t) <= want && found < limit; i += sizeof(uint64_t)) {
+                uint64_t v = 0;
+                memcpy(&v, buf + i, sizeof(v));
+                if (v != target) continue;
+                uint64_t object = start + off + i;
+                fprintf(out, "instance 0x%" PRIx64 " klass=0x%" PRIx64 "\n", object, target);
+                ++found;
+            }
+            if (want < chunkSize) break;
+            off += want - sizeof(uint64_t);
+            off &= ~(uint64_t)(sizeof(uint64_t) - 1);
+        }
+    }
+    fclose(maps);
+    g_dump_guard_active = 0;
+    remove_dump_guard();
+    fprintf(out, "instances=%d\n", found);
+    return found > 0;
+}
+
+static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
+    if (limit <= 0 || limit > 4096) limit = 512;
+    if (service < 0x100000000ULL || service > 0x800000000000ULL) {
+        fprintf(out, "ERR: invalid HealthLinkService address\n");
+        return false;
+    }
+
+    install_dump_guard();
+    g_dump_guard_active = 1;
+    if (sigsetjmp(g_dump_jmp, 1) != 0) {
+        g_dump_guard_active = 0;
+        remove_dump_guard();
+        fprintf(out, "ERR: stale/unreadable address while walking Health pool\n");
+        return false;
+    }
+
+    // HealthLinkService fields from the runtime class layout:
+    //   +0x10 EcsWorld* _defaultWorld
+    //   +0x28 EcsPool<Health>* _healthPool
+    uint64_t world = 0;
+    uint64_t pool = 0;
+    memcpy(&world, (void *)(service + 0x10), sizeof(world));
+    memcpy(&pool, (void *)(service + 0x28), sizeof(pool));
+    if (pool < 0x100000000ULL || pool > 0x800000000000ULL) {
+        g_dump_guard_active = 0;
+        remove_dump_guard();
+        fprintf(out, "ERR: service+0x28 is not an EcsPool pointer: 0x%" PRIx64 "\n", pool);
+        return false;
+    }
+
+    // EcsPool<T> reference-type fields on arm64 IL2CPP:
+    //   +0x38 _denseItems, +0x40 _sparseItems, +0x48 _denseItemsCount.
+    uint64_t dense = 0;
+    uint64_t sparse = 0;
+    int32_t denseCount = 0;
+    memcpy(&dense, (void *)(pool + 0x38), sizeof(dense));
+    memcpy(&sparse, (void *)(pool + 0x40), sizeof(sparse));
+    memcpy(&denseCount, (void *)(pool + 0x48), sizeof(denseCount));
+    if (dense < 0x100000000ULL || dense > 0x800000000000ULL ||
+        sparse < 0x100000000ULL || sparse > 0x800000000000ULL ||
+        denseCount < 0 || denseCount > 1000000) {
+        g_dump_guard_active = 0;
+        remove_dump_guard();
+        fprintf(out, "ERR: unexpected EcsPool layout pool=0x%" PRIx64
+                     " dense=0x%" PRIx64 " sparse=0x%" PRIx64 " count=%d\n",
+                pool, dense, sparse, denseCount);
+        return false;
+    }
+
+    uint64_t sparseLen = 0;
+    memcpy(&sparseLen, (void *)(sparse + 0x18), sizeof(sparseLen));
+    if (sparseLen > 1000000) sparseLen = 1000000;
+    fprintf(out, "world=0x%" PRIx64 " pool=0x%" PRIx64
+                 " dense=0x%" PRIx64 " sparse=0x%" PRIx64
+                 " denseCount=%d sparseLen=%" PRIu64 "\n",
+            world, pool, dense, sparse, denseCount, sparseLen);
+
+    int shown = 0;
+    for (uint64_t entity = 0; entity < sparseLen && shown < limit; ++entity) {
+        int32_t denseIndex = -1;
+        memcpy(&denseIndex, (void *)(sparse + 0x20 + entity * sizeof(int32_t)), sizeof(denseIndex));
+        if (denseIndex < 0 || denseIndex >= denseCount) continue;
+
+        uint64_t item = dense + 0x20 + (uint64_t)denseIndex * 0x18;
+        int64_t value = 0;
+        int64_t maxValue = 0;
+        memcpy(&value, (void *)item, sizeof(value));
+        memcpy(&maxValue, (void *)(item + 0x08), sizeof(maxValue));
+        fprintf(out, "entity=%" PRIu64 " dense=%d value=%" PRId64 " max=%" PRId64 "\n",
+                entity, denseIndex, value, maxValue);
+        ++shown;
+    }
+
+    g_dump_guard_active = 0;
+    remove_dump_guard();
+    fprintf(out, "health_rows=%d\n", shown);
+    return true;
+}
+
 static bool resolve_health_api(HealthScanApi &api, void *handle) {
     memset(&api, 0, sizeof(api));
     api.domain_get            = (decltype(api.domain_get))           xdl_sym(handle, "il2cpp_domain_get", nullptr);
@@ -552,9 +719,6 @@ static bool resolve_health_api(HealthScanApi &api, void *handle) {
     LOGI("resolve_health_api: %s", ok ? "ok" : "FAILED");
     return ok;
 }
-
-static HealthScanApi g_rpc_api;
-static bool g_rpc_api_ok = false;
 
 static void rpc_dump_class(FILE *out, void *klass) {
     const char *ns   = g_rpc_api.class_get_namespace(klass);
@@ -794,6 +958,32 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "\n--- found %d ---\n", found);
         }
     }
+    else if (strncmp(cmd, "instances ", 10) == 0) {
+        char cls[256] = {0};
+        int limit = 32;
+        int n = sscanf(cmd + 10, "%255s %d", cls, &limit);
+        if (n >= 1) {
+            void *klass = rpc_find_class(cls);
+            if (!klass) {
+                fprintf(out, "ERR: class not found: %s\n", cls);
+            } else {
+                fprintf(out, "class=%s klass=0x%" PRIx64 "\n", cls, (uint64_t)(uintptr_t)klass);
+                rpc_scan_rw_instances(out, klass, limit);
+            }
+        } else {
+            fprintf(out, "ERR: usage: instances <ClassName> [limit]\n");
+        }
+    }
+    else if (strncmp(cmd, "healthdump ", 11) == 0) {
+        uint64_t service = 0;
+        int limit = 512;
+        int n = sscanf(cmd + 11, "%" SCNx64 " %d", &service, &limit);
+        if (n >= 1) {
+            rpc_health_dump(out, service, limit);
+        } else {
+            fprintf(out, "ERR: usage: healthdump <HealthLinkService_addr> [limit]\n");
+        }
+    }
     else if (strncmp(cmd, "methods ", 8) == 0) {
         char cls[256] = {0};
         if (sscanf(cmd + 8, "%255s", cls) == 1) rpc_dump_methods(out, cls);
@@ -930,12 +1120,41 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "int32 @0x%" PRIx64 " = %d\n", addr, v);
         }
     }
+    else if (strncmp(cmd, "readu64 ", 8) == 0) {
+        uint64_t addr = 0;
+        if (sscanf(cmd + 8, "%" SCNx64, &addr) == 1) {
+            uint64_t v; memcpy(&v, (void*)addr, 8);
+            fprintf(out, "uint64 @0x%" PRIx64 " = 0x%" PRIx64 "\n", addr, v);
+        }
+    }
+    else if (strncmp(cmd, "readstr ", 8) == 0) {
+        uint64_t addr = 0;
+        int maxLen = 256;
+        int n = sscanf(cmd + 8, "%" SCNx64 " %d", &addr, &maxLen);
+        if (n >= 1) {
+            if (maxLen <= 0 || maxLen > 4096) maxLen = 256;
+            const char *p = (const char *)addr;
+            int len = 0;
+            for (; len < maxLen; ++len) {
+                if (p[len] == '\0') break;
+            }
+            fprintf(out, "str @0x%" PRIx64 " = \"", addr);
+            for (int i = 0; i < len; ++i) {
+                unsigned char c = (unsigned char)p[i];
+                if (c == '\\' || c == '"') fprintf(out, "\\%c", c);
+                else if (c >= 0x20 && c < 0x7f) fputc(c, out);
+                else fprintf(out, "\\x%02x", c);
+            }
+            fprintf(out, "\"\n");
+        }
+    }
     else {
         fprintf(out, "ERR: unknown cmd\n");
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
-                     "      class <name> | methods <name>\n"
+                     "      class <name> | instances <name> [limit] | healthdump <addr> [limit] | methods <name>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
+                     "      readu64 <addr> | readstr <addr> [max]\n"
                      "spec: src[:type][,src[:type]]*\n"
                      "  src  = this | a0 | a1 | a2 | a3 (支持 +offset, 如 this+0x28)\n"
                      "  type = i8|u8|i16|u16|i32|u32|i64|u64|f32|f64|ptr (默认 i64)\n"

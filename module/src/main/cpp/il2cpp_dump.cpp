@@ -1032,7 +1032,7 @@ static void rpc_static_refs(FILE *out, const char *image_filter, const char *tar
         if (!storage) continue;
         void *iter = nullptr;
         while (auto field = g_rpc_api.class_get_fields(owner, &iter)) {
-            const auto flags = il2cpp_field_get_flags(field);
+            const auto flags = il2cpp_field_get_flags((FieldInfo *)field);
             if (!(flags & FIELD_ATTRIBUTE_STATIC) || (flags & FIELD_ATTRIBUTE_LITERAL)) continue;
             const size_t offset = g_rpc_api.field_get_offset(field);
             // Thread statics use a sentinel offset; bound regular static storage offsets.

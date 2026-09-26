@@ -574,6 +574,10 @@ static bool rpc_field_offset(void *klass, const char *fieldName, size_t *outOffs
     return false;
 }
 
+// Defined with the checked RPC read helpers below; health pool diagnostics
+// are declared earlier in this translation unit.
+static bool rpc_read_exact(uint64_t address, void *value, size_t size);
+
 static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
     if (!klass) return false;
     if (limit <= 0 || limit > 256) limit = 32;

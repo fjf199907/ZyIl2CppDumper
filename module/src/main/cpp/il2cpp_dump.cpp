@@ -812,6 +812,65 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
     return true;
 }
 
+// Read a caller-supplied EcsPool<Health> without dereferencing untrusted
+// pointers.  The command deliberately reports ambiguity instead of turning
+// a guessed dense layout into a fake HP value.
+static bool rpc_health_pool_dump(FILE *out, uint64_t pool, int limit) {
+    if (limit <= 0 || limit > 4096) limit = 256;
+    if (pool < 0x100000000ULL || pool > 0x800000000000ULL) {
+        fprintf(out, "ERR: invalid EcsPool address\n");
+        return false;
+    }
+    uint64_t dense = 0, sparse = 0;
+    int32_t count = 0;
+    if (!rpc_read_exact(pool + 0x38, &dense, sizeof(dense)) ||
+        !rpc_read_exact(pool + 0x40, &sparse, sizeof(sparse)) ||
+        !rpc_read_exact(pool + 0x48, &count, sizeof(count))) {
+        fprintf(out, "ERR: unreadable EcsPool header pool=0x%" PRIx64 "\n", pool);
+        return false;
+    }
+    uint64_t sparseLen = 0;
+    if (dense < 0x100000000ULL || dense > 0x800000000000ULL ||
+        sparse < 0x100000000ULL || sparse > 0x800000000000ULL ||
+        count <= 0 || count > 1000000 ||
+        !rpc_read_exact(sparse + 0x18, &sparseLen, sizeof(sparseLen)) ||
+        sparseLen > 1000000) {
+        fprintf(out, "ERR: invalid EcsPool header pool=0x%" PRIx64
+                     " dense=0x%" PRIx64 " sparse=0x%" PRIx64 " count=%d\n",
+                pool, dense, sparse, count);
+        return false;
+    }
+    fprintf(out, "pool=0x%" PRIx64 " dense=0x%" PRIx64
+                 " sparse=0x%" PRIx64 " denseCount=%d sparseLen=%" PRIu64
+                 " layout=health_candidates data=+0x20\n",
+            pool, dense, sparse, count, sparseLen);
+    int shown = 0, plausible = 0;
+    for (uint64_t entity = 0; entity < sparseLen && shown < limit; ++entity) {
+        int32_t di = -1;
+        if (!rpc_read_exact(sparse + 0x20 + entity * sizeof(di), &di, sizeof(di)))
+            continue;
+        if (di <= 0 || di >= count) continue;
+        uint64_t item = dense + 0x20 + (uint64_t)di * 0x18;
+        int64_t value = 0, maxValue = 0;
+        uint64_t damage = 0;
+        if (!rpc_read_exact(item, &value, sizeof(value)) ||
+            !rpc_read_exact(item + 0x08, &maxValue, sizeof(maxValue)) ||
+            !rpc_read_exact(item + 0x10, &damage, sizeof(damage))) continue;
+        bool sane = maxValue > 0 && maxValue < INT64_C(1000000000000) &&
+                    value >= 0 && value <= maxValue;
+        if (sane) ++plausible;
+        double ratio = maxValue > 0 ? (double)value * 100.0 / (double)maxValue : 0.0;
+        fprintf(out, "entity=%" PRIu64 " dense=%d value=%" PRId64
+                     " max=%" PRId64 " damageList=0x%" PRIx64
+                     " sane=%s ratio=%.2f%%\n", entity, di, value, maxValue,
+                damage, sane ? "yes" : "no", ratio);
+        ++shown;
+    }
+    fprintf(out, "health_rows=%d plausible=%d layout=%s\n", shown, plausible,
+            plausible ? "candidate" : "ambiguous");
+    return shown > 0;
+}
+
 static bool resolve_health_api(HealthScanApi &api, void *handle) {
     memset(&api, 0, sizeof(api));
     api.domain_get            = (decltype(api.domain_get))           xdl_sym(handle, "il2cpp_domain_get", nullptr);
@@ -1379,6 +1438,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "ERR: usage: healthdump <HealthLinkService_addr> [limit]\n");
         }
     }
+    else if (strncmp(cmd, "healthpooldump ", 15) == 0) {
+        unsigned long long pool = 0; int limit = 256;
+        int n = sscanf(cmd + 15, "%llx %d", &pool, &limit);
+        if (n >= 1) rpc_health_pool_dump(out, (uint64_t)pool, limit);
+        else fprintf(out, "ERR: usage: healthpooldump <EcsPool_addr> [limit]\n");
+    }
     else if (strncmp(cmd, "methods ", 8) == 0) {
         char cls[256] = {0};
         if (sscanf(cmd + 8, "%255s", cls) == 1) rpc_dump_methods(out, cls);
@@ -1584,7 +1649,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
         fprintf(out, "ERR: unknown cmd\n");
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
                      "      class <name> | instances/liveinstances (disabled: unsafe discovery)\n"
-                     "      healthdump <addr> [limit] | methods <name>\n"
+                     "      healthdump <addr> [limit] | healthpooldump <pool> [limit] | methods <name>\n"
                      "      staticrefs <image.dll> <FullClassName>\n"
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
                      "      rpcinfo | objrefs <object_addr_hex>\n"

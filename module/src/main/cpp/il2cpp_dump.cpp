@@ -1075,23 +1075,10 @@ static void rpc_handle(const char *cmd, FILE *out) {
         }
     }
     else if (strncmp(cmd, "instances ", 10) == 0) {
-        fprintf(out, "ERR: instances disabled; use liveinstances <ClassName> [limit]\n");
+        fprintf(out, "ERR: instances disabled: automatic object discovery is unsafe; use fixed addresses\n");
     }
     else if (strncmp(cmd, "liveinstances ", 14) == 0) {
-        char cls[256] = {0};
-        int limit = 32;
-        int n = sscanf(cmd + 14, "%255s %d", cls, &limit);
-        if (n >= 1) {
-            void *klass = rpc_find_class(cls);
-            if (!klass) {
-                fprintf(out, "ERR: class not found: %s\n", cls);
-            } else {
-                fprintf(out, "class=%s klass=0x%" PRIx64 "\n", cls, (uint64_t)(uintptr_t)klass);
-                rpc_live_instances(out, klass, limit);
-            }
-        } else {
-            fprintf(out, "ERR: usage: liveinstances <ClassName> [limit]\n");
-        }
+        fprintf(out, "ERR: liveinstances disabled: IL2CPP liveness is unsafe from RPC context\n");
     }
     else if (strncmp(cmd, "healthdump ", 11) == 0) {
         uint64_t service = 0;
@@ -1270,7 +1257,8 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else {
         fprintf(out, "ERR: unknown cmd\n");
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
-                     "      class <name> | liveinstances <name> [limit] | healthdump <addr> [limit] | methods <name>\n"
+                     "      class <name> | instances/liveinstances (disabled: unsafe discovery)\n"
+                     "      healthdump <addr> [limit] | methods <name>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

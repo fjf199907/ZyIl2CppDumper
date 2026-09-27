@@ -532,6 +532,7 @@ struct HealthScanApi {
 
 static HealthScanApi g_rpc_api;
 static bool g_rpc_api_ok = false;
+static bool rpc_read_pointer(uint64_t address, uint64_t *value);
 
 static const char *const g_il2cpp_api_names[] = {
     "il2cpp_domain_get", "il2cpp_domain_get_assemblies",

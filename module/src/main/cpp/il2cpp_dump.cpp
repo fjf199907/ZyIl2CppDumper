@@ -533,6 +533,55 @@ struct HealthScanApi {
 static HealthScanApi g_rpc_api;
 static bool g_rpc_api_ok = false;
 
+static const char *const g_il2cpp_api_names[] = {
+    "il2cpp_domain_get", "il2cpp_domain_get_assemblies",
+    "il2cpp_assembly_get_image", "il2cpp_image_get_name",
+    "il2cpp_image_get_class_count", "il2cpp_image_get_class",
+    "il2cpp_class_from_name", "il2cpp_class_get_name",
+    "il2cpp_class_get_namespace", "il2cpp_class_get_parent",
+    "il2cpp_class_get_fields", "il2cpp_class_get_methods",
+    "il2cpp_class_get_properties", "il2cpp_class_get_method_from_name",
+    "il2cpp_class_get_nested_types", "il2cpp_class_get_interfaces",
+    "il2cpp_class_is_valuetype", "il2cpp_class_is_enum",
+    "il2cpp_field_get_name", "il2cpp_field_get_flags",
+    "il2cpp_field_get_offset", "il2cpp_field_get_type",
+    "il2cpp_field_static_get_value", "il2cpp_field_static_set_value",
+    "il2cpp_method_get_name", "il2cpp_method_get_flags",
+    "il2cpp_method_get_param_count", "il2cpp_method_get_param",
+    "il2cpp_method_get_param_name", "il2cpp_method_get_return_type",
+    "il2cpp_runtime_invoke", "il2cpp_object_get_class",
+    "il2cpp_object_new", "il2cpp_object_unbox", "il2cpp_value_box",
+    "il2cpp_runtime_object_init", "il2cpp_string_new",
+    "il2cpp_string_chars", "il2cpp_string_length",
+    "il2cpp_array_length", "il2cpp_array_new",
+    "il2cpp_thread_attach", "il2cpp_thread_detach",
+    "il2cpp_thread_current", "il2cpp_gchandle_new",
+    "il2cpp_gchandle_get_target", "il2cpp_gchandle_free",
+    "il2cpp_gc_get_heap_size", "il2cpp_gc_get_used_size"
+};
+
+static void rpc_api_info(FILE *out) {
+    void *handle = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!handle) { fprintf(out, "ERR: libil2cpp.so not loaded\n"); return; }
+    const size_t count = sizeof(g_il2cpp_api_names) / sizeof(g_il2cpp_api_names[0]);
+    fprintf(out, "apiinfo count=%zu\n", count);
+    for (size_t i = 0; i < count; ++i)
+        fprintf(out, "%s=%s\n", g_il2cpp_api_names[i],
+                xdl_sym(handle, g_il2cpp_api_names[i], nullptr) ? "available" : "unavailable");
+}
+
+static void rpc_object_class(FILE *out, uint64_t object) {
+    uint64_t klass = 0;
+    if (!object || !rpc_read_pointer(object, &klass) || !klass) {
+        fprintf(out, "ERR: object has no valid klass\n"); return;
+    }
+    auto *k = (Il2CppClass *)(uintptr_t)klass;
+    const char *ns = il2cpp_class_get_namespace(k);
+    const char *name = il2cpp_class_get_name(k);
+    fprintf(out, "objectclass object=0x%" PRIx64 " klass=0x%" PRIx64 " type=%s%s%s\n",
+            object, klass, ns ? ns : "", ns && *ns ? "." : "", name ? name : "UNKNOWN");
+}
+
 static void *rpc_find_class(const char *className, void **outImage = nullptr) {
     if (outImage) *outImage = nullptr;
     if (!className || !*className) return nullptr;
@@ -572,6 +621,24 @@ static bool rpc_field_offset(void *klass, const char *fieldName, size_t *outOffs
         }
     }
     return false;
+}
+
+static void rpc_field_offset_cmd(FILE *out, const char *args) {
+    char cls[384] = {}, field[128] = {}, extra = 0;
+    if (sscanf(args, "%383s %127s %c", cls, field, &extra) != 2) {
+        fprintf(out, "ERR: usage: fieldoffset <FullClassName> <field>\n");
+        return;
+    }
+    if (!g_rpc_api_ok) { fprintf(out, "ERR: IL2CPP metadata API unavailable\n"); return; }
+    void *klass = rpc_find_class(cls);
+    if (!klass) { fprintf(out, "ERR: class not found %s\n", cls); return; }
+    size_t offset = 0;
+    if (!rpc_field_offset(klass, field, &offset)) {
+        fprintf(out, "ERR: field not found class=%s field=%s\n", cls, field);
+        return;
+    }
+    fprintf(out, "fieldoffset class=%s field=%s klass=0x%" PRIxPTR " offset=0x%zx\n",
+            cls, field, (uintptr_t)klass, offset);
 }
 
 // Defined with the checked RPC read helpers below; health pool diagnostics
@@ -1440,6 +1507,27 @@ static void rpc_handle(const char *cmd, FILE *out) {
         fprintf(out, "diagnostic_revision=2\n");
         fprintf(out, "limits: read_bytes=4096 task_slots=64 task_fields=128 metadata_classes=250000\n");
     }
+    else if (strcmp(cmd, "apiinfo") == 0) {
+        rpc_api_info(out);
+    }
+    else if (strncmp(cmd, "classfromname ", 14) == 0) {
+        void *klass = rpc_find_class(cmd + 14);
+        if (!klass) fprintf(out, "ERR: class not found %s\n", cmd + 14);
+        else { fprintf(out, "classfromname class=%s klass=0x%" PRIxPTR "\n", cmd + 14, (uintptr_t)klass); rpc_dump_class(out, klass); }
+    }
+    else if (strncmp(cmd, "methodinfo ", 11) == 0) {
+        void *klass = rpc_find_class(cmd + 11);
+        if (!klass) fprintf(out, "ERR: class not found %s\n", cmd + 11);
+        else { fprintf(out, "methodinfo class=%s\n", cmd + 11); rpc_dump_class(out, klass); }
+    }
+    else if (strncmp(cmd, "objectclass ", 12) == 0) {
+        uint64_t object = 0; char extra;
+        if (sscanf(cmd + 12, "%" SCNx64 " %c", &object, &extra) == 1) rpc_object_class(out, object);
+        else fprintf(out, "ERR: usage: objectclass <object_addr_hex>\n");
+    }
+    else if (strncmp(cmd, "fieldoffset ", 12) == 0) {
+        rpc_field_offset_cmd(out, cmd + 12);
+    }
     else if (strcmp(cmd, "base") == 0) {
         fprintf(out, "il2cpp_base=0x%" PRIx64 "\n", il2cpp_base);
     }
@@ -1735,7 +1823,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      healthdump <addr> [limit] | healthpooldump <pool> [limit] | methods <name>\n"
                      "      staticrefs <image.dll> <FullClassName>\n"
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
-                     "      rpcinfo | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
+                     "      rpcinfo | apiinfo | classfromname <FullClassName> | methodinfo <FullClassName> | objectclass <object_addr_hex> | fieldoffset <FullClassName> <field> | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
                      "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"

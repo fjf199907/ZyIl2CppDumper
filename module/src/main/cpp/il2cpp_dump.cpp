@@ -1072,6 +1072,42 @@ static bool rpc_read_checked(FILE *out, uint64_t address, void *value, size_t si
     return false;
 }
 
+// Fast, read-only PlayerLoop root inspection.  This deliberately returns
+// addresses only; Python can decide which active task chain is relevant.
+static void rpc_runner_roots(FILE *out, uint64_t root) {
+    if (!root) { fprintf(out, "ERR: runner root is null\n"); return; }
+    uint64_t header[4] = {};
+    if (!rpc_read_checked(out, root, header, sizeof(header))) return;
+    if (!header[0] || header[2] != 0 || header[3] == 0 || header[3] > 64) {
+        fprintf(out, "ERR: invalid runners array\n"); return;
+    }
+    uint64_t runners[64] = {};
+    if (!rpc_read_checked(out, root + 0x20, runners, header[3] * sizeof(uint64_t))) return;
+    fprintf(out, "runnerroots root=0x%" PRIx64 " count=%" PRIu64 "\n", root, header[3]);
+    for (uint64_t i = 0; i < header[3]; ++i) {
+        if (!runners[i]) { fprintf(out, "[%" PRIu64 "] runner=0x0 tail=0\n", i); continue; }
+        int32_t tail = 0;
+        uint64_t items = 0;
+        if (!rpc_read_exact(runners[i] + 0x30, &tail, sizeof(tail)) ||
+            !rpc_read_pointer(runners[i] + 0x38, &items)) {
+            fprintf(out, "[%" PRIu64 "] runner=0x%" PRIx64 " unreadable\n", i, runners[i]);
+            continue;
+        }
+        fprintf(out, "[%" PRIu64 "] runner=0x%" PRIx64 " tail=%d loopItems=0x%" PRIx64 "\n",
+                i, runners[i], tail, items);
+        if (tail <= 0 || !items || tail > 1048576) continue;
+        uint64_t cap = 0;
+        if (rpc_read_exact(items + 0x18, &cap, sizeof(cap)) && cap >= (uint64_t)tail && cap <= 1048576) {
+            uint64_t sample = tail > 64 ? 64 : (uint64_t)tail;
+            uint64_t slots[64] = {};
+            if (rpc_read_exact(items + 0x20, slots, sample * sizeof(uint64_t))) {
+                for (uint64_t j = 0; j < sample; ++j)
+                    if (slots[j]) fprintf(out, "  item[%" PRIu64 "]=0x%" PRIx64 "\n", j, slots[j]);
+            }
+        }
+    }
+}
+
 // Inspect only caller-selected array slots and direct fields of metadata-known classes.
 // Unknown/inflated class pointers are never passed to IL2CPP class APIs.
 static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single = false) {
@@ -1376,6 +1412,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strcmp(cmd, "base") == 0) {
         fprintf(out, "il2cpp_base=0x%" PRIx64 "\n", il2cpp_base);
     }
+    else if (strncmp(cmd, "runnerroots ", 12) == 0) {
+        uint64_t root = 0; char extra;
+        if (sscanf(cmd + 12, "%" SCNx64 " %c", &root, &extra) == 1)
+            rpc_runner_roots(out, root);
+        else fprintf(out, "ERR: usage: runnerroots <runners_array_addr>\n");
+    }
     else if (strcmp(cmd, "images") == 0) {
         void *domain = g_rpc_api.domain_get();
         size_t asmCount = 0;
@@ -1442,9 +1484,9 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "ERR: usage: healthdump <HealthLinkService_addr> [limit]\n");
         }
     }
-    else if (strncmp(cmd, "healthpooldump ", 15) == 0) {
+    else if (strncmp(cmd, "healthpooldump ", sizeof("healthpooldump ") - 1) == 0) {
         unsigned long long pool = 0; int limit = 256;
-        int n = sscanf(cmd + 15, "%llx %d", &pool, &limit);
+        int n = sscanf(cmd + sizeof("healthpooldump ") - 1, "%llx %d", &pool, &limit);
         if (n >= 1) rpc_health_pool_dump(out, (uint64_t)pool, limit);
         else fprintf(out, "ERR: usage: healthpooldump <EcsPool_addr> [limit]\n");
     }
@@ -1656,7 +1698,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      healthdump <addr> [limit] | healthpooldump <pool> [limit] | methods <name>\n"
                      "      staticrefs <image.dll> <FullClassName>\n"
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
-                     "      rpcinfo | objrefs <object_addr_hex>\n"
+                     "      rpcinfo | objrefs <object_addr_hex> | runnerroots <runners_array_addr>\n"
                      "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"

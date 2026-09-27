@@ -562,13 +562,29 @@ static const char *const g_il2cpp_api_names[] = {
 };
 
 static void rpc_api_info(FILE *out) {
-    void *handle = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!handle) { fprintf(out, "ERR: libil2cpp.so not loaded\n"); return; }
     const size_t count = sizeof(g_il2cpp_api_names) / sizeof(g_il2cpp_api_names[0]);
     fprintf(out, "apiinfo count=%zu\n", count);
-    for (size_t i = 0; i < count; ++i)
-        fprintf(out, "%s=%s\n", g_il2cpp_api_names[i],
-                xdl_sym(handle, g_il2cpp_api_names[i], nullptr) ? "available" : "unavailable");
+    // Do not call dlopen/dlsym from the RPC thread.  Android linker handles
+    // are not uniformly safe across Unity builds.  Report the APIs resolved
+    // by the module's existing metadata table instead.
+    for (size_t i = 0; i < count; ++i) {
+        bool available = false;
+        const char *n = g_il2cpp_api_names[i];
+        if (!strcmp(n, "il2cpp_domain_get")) available = g_rpc_api.domain_get != nullptr;
+        else if (!strcmp(n, "il2cpp_domain_get_assemblies")) available = g_rpc_api.domain_get_assemblies != nullptr;
+        else if (!strcmp(n, "il2cpp_assembly_get_image")) available = g_rpc_api.assembly_get_image != nullptr;
+        else if (!strcmp(n, "il2cpp_image_get_class_count")) available = g_rpc_api.image_get_class_count != nullptr;
+        else if (!strcmp(n, "il2cpp_image_get_class")) available = g_rpc_api.image_get_class != nullptr;
+        else if (!strcmp(n, "il2cpp_image_get_name")) available = g_rpc_api.image_get_name != nullptr;
+        else if (!strcmp(n, "il2cpp_class_get_name")) available = g_rpc_api.class_get_name != nullptr;
+        else if (!strcmp(n, "il2cpp_class_get_namespace")) available = g_rpc_api.class_get_namespace != nullptr;
+        else if (!strcmp(n, "il2cpp_class_get_fields")) available = g_rpc_api.class_get_fields != nullptr;
+        else if (!strcmp(n, "il2cpp_field_get_name")) available = g_rpc_api.field_get_name != nullptr;
+        else if (!strcmp(n, "il2cpp_field_get_offset")) available = g_rpc_api.field_get_offset != nullptr;
+        else if (!strcmp(n, "il2cpp_field_get_type")) available = g_rpc_api.field_get_type != nullptr;
+        else if (!strcmp(n, "il2cpp_class_from_type")) available = g_rpc_api.class_from_type != nullptr;
+        fprintf(out, "%s=%s\n", n, available ? "available" : "unavailable");
+    }
 }
 
 static void rpc_object_class(FILE *out, uint64_t object) {

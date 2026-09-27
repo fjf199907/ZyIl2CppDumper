@@ -1108,6 +1108,37 @@ static void rpc_runner_roots(FILE *out, uint64_t root) {
     }
 }
 
+static void rpc_runner_graph(FILE *out, uint64_t root) {
+    if (!root) { fprintf(out, "ERR: runner root is null\n"); return; }
+    uint64_t header[4] = {};
+    if (!rpc_read_checked(out, root, header, sizeof(header))) return;
+    if (!header[0] || header[2] != 0 || header[3] == 0 || header[3] > 64) {
+        fprintf(out, "ERR: invalid runners array\n"); return;
+    }
+    uint64_t runners[64] = {};
+    if (!rpc_read_checked(out, root + 0x20, runners, header[3] * sizeof(uint64_t))) return;
+    fprintf(out, "runnergraph root=0x%" PRIx64 " count=%" PRIu64 "\n", root, header[3]);
+    for (uint64_t i = 0; i < header[3]; ++i) {
+        if (!runners[i]) continue;
+        int32_t tail = 0; uint64_t items = 0;
+        if (!rpc_read_exact(runners[i] + 0x30, &tail, sizeof(tail)) ||
+            !rpc_read_pointer(runners[i] + 0x38, &items) || tail <= 0 || tail > 64 || !items) continue;
+        uint64_t slots[64] = {};
+        if (!rpc_read_exact(items + 0x20, slots, (size_t)tail * sizeof(uint64_t))) continue;
+        for (uint64_t j = 0; j < (uint64_t)tail; ++j) {
+            uint64_t obj = slots[j], klass = 0;
+            if (!obj || !rpc_read_pointer(obj, &klass)) continue;
+            const char *name = nullptr, *ns = nullptr;
+            if (klass) {
+                name = il2cpp_class_get_name((Il2CppClass *)(uintptr_t)klass);
+                ns = il2cpp_class_get_namespace((Il2CppClass *)(uintptr_t)klass);
+            }
+            fprintf(out, "runner[%" PRIu64 "] item[%" PRIu64 "] object=0x%" PRIx64 " type=%s%s%s\n",
+                    i, j, obj, ns ? ns : "", ns && *ns ? "." : "", name ? name : "UNKNOWN");
+        }
+    }
+}
+
 // Inspect only caller-selected array slots and direct fields of metadata-known classes.
 // Unknown/inflated class pointers are never passed to IL2CPP class APIs.
 static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single = false) {
@@ -1412,6 +1443,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strcmp(cmd, "base") == 0) {
         fprintf(out, "il2cpp_base=0x%" PRIx64 "\n", il2cpp_base);
     }
+    else if (strncmp(cmd, "runnergraph ", 12) == 0) {
+        uint64_t root = 0; char extra;
+        if (sscanf(cmd + 12, "%" SCNx64 " %c", &root, &extra) == 1)
+            rpc_runner_graph(out, root);
+        else fprintf(out, "ERR: usage: runnergraph <runners_array_addr>\n");
+    }
     else if (strncmp(cmd, "runnerroots ", 12) == 0) {
         uint64_t root = 0; char extra;
         if (sscanf(cmd + 12, "%" SCNx64 " %c", &root, &extra) == 1)
@@ -1698,7 +1735,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      healthdump <addr> [limit] | healthpooldump <pool> [limit] | methods <name>\n"
                      "      staticrefs <image.dll> <FullClassName>\n"
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
-                     "      rpcinfo | objrefs <object_addr_hex> | runnerroots <runners_array_addr>\n"
+                     "      rpcinfo | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
                      "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"

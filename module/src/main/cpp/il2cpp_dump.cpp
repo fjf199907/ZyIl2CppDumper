@@ -1076,15 +1076,34 @@ static void rpc_method_addr(FILE *out, const char *args) {
             char full[512] = {};
             snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name ? name : "");
             if (strcmp(cls, name ? name : "") != 0 && strcmp(cls, full) != 0) continue;
-            void *iter = nullptr;
-            while (auto *method = il2cpp_class_get_methods(klass, &iter)) {
-                const char *mn = il2cpp_method_get_name(method);
-                if (!mn || strcmp(mn, method_name) != 0) continue;
+            const MethodInfo *selected = nullptr;
+            unsigned matches = 0;
+            // Prefer exact names; only then accept an explicit-interface suffix.
+            for (int pass = 0; pass < 2 && matches == 0; ++pass) {
+                void *iter = nullptr;
+                while (auto *method = il2cpp_class_get_methods(klass, &iter)) {
+                    const char *mn = il2cpp_method_get_name(method);
+                    if (!mn) continue;
+                    const char *dot = strrchr(mn, '.');
+                    bool match = pass == 0 ? strcmp(mn, method_name) == 0
+                        : (!strchr(method_name, '.') && dot && dot != mn &&
+                           strcmp(dot + 1, method_name) == 0);
+                    if (match) { selected = method; ++matches; }
+                }
+            }
+            if (matches > 1) {
+                fprintf(out, "ERR: ambiguous method class=%s method=%s matches=%u; use full name; overloads require signature selection\n",
+                        full, method_name, matches);
+                return;
+            }
+            if (selected) {
+                const auto *method = selected;
+                const char *resolved_name = il2cpp_method_get_name(method);
                 uint64_t va = (uint64_t)method->methodPointer;
                 uint64_t rva = va >= il2cpp_base ? va - il2cpp_base : 0;
                 fprintf(out, "methodaddr class=%s method=%s VA=0x%" PRIx64
                              " RVA=0x%" PRIx64 " base=0x%" PRIx64 "\n",
-                        full, method_name, va, rva, il2cpp_base);
+                        full, resolved_name, va, rva, il2cpp_base);
                 return;
             }
         }
@@ -1548,6 +1567,8 @@ static int rpc_scan(FILE *out, const char *imagePattern, const char *classPatter
     return hits;
 }
 
+#include "health_hook.inc"
+
 static void rpc_handle(const char *cmd, FILE *out) {
     while (*cmd == ' ' || *cmd == '\t') cmd++;
     if (!*cmd) return;
@@ -1558,9 +1579,12 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strcmp(cmd, "rpcinfo") == 0) {
         fprintf(out, "protocol=2 build=majo-readonly-diag-20260927-v1 compiled=%s %s pid=%d ptrsize=%zu\n",
                 __DATE__, __TIME__, getpid(), sizeof(uintptr_t));
-        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs,fieldlayout\n");
+        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs,fieldlayout,healthhook\n");
         fprintf(out, "diagnostic_revision=2\n");
         fprintf(out, "limits: read_bytes=4096 task_slots=64 task_fields=128 metadata_classes=250000\n");
+    }
+    else if (strncmp(cmd, "healthhook ", 11) == 0) {
+        health_hook::command(out, cmd + 11);
     }
     else if (strcmp(cmd, "apiinfo") == 0) {
         rpc_api_info(out);
@@ -1732,6 +1756,9 @@ static void rpc_handle(const char *cmd, FILE *out) {
                 strncpy(name, sp, 63);
                 strcpy(spec, "this:i64");
             }
+            if (addr == health_hook::hook_address) {
+                fprintf(out, "ERR: TickView is owned by healthhook\n"); return;
+            }
             int idx = hook_install_ex(addr, name, spec);
             if (idx >= 0)
                 fprintf(out, "hook installed: slot=%d addr=0x%" PRIx64 " spec=%s\n", idx, addr, spec);
@@ -1883,6 +1910,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
                      "      rpcinfo | apiinfo | classfromname <FullClassName> | methodinfo <FullClassName> | methodaddr <FullClassName> <method> | objectclass <object_addr_hex> | fieldoffset <FullClassName> <field> | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
                      "      fieldlayout <OwnerClass> <FieldName>\n"
+                     "      healthhook start <value> <interval_ms> | healthhook status | healthhook stop\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"
@@ -1944,6 +1972,7 @@ static void* rpc_server_thread(void*) {
             write(cli, &eof, 1);
         }
     cli_done:
+        health_hook::stop();
         close(cli);
         LOGI("rpc: client disconnected");
     }

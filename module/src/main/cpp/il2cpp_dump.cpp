@@ -1586,6 +1586,9 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strncmp(cmd, "healthhook ", 11) == 0) {
         health_hook::command(out, cmd + 11);
     }
+    else if (strcmp(cmd, "healthdiag metadata") == 0) {
+        health_hook::metadata_probe(out);
+    }
     else if (strcmp(cmd, "apiinfo") == 0) {
         rpc_api_info(out);
     }

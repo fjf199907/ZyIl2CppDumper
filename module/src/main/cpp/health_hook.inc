@@ -20,6 +20,7 @@ static const char *mode_name() {
 static uint64_t callbacks = 0, scans = 0, writes = 0, dropped = 0;
 static uint64_t last_startup = 0, last_hash = UINT64_MAX;
 static void *startup_class = nullptr, *character_class = nullptr, *health_system_class = nullptr;
+static void *damage_class = nullptr;
 static std::deque<std::string> events;
 static std::string last_error;
 static uint64_t now_ms() {
@@ -134,6 +135,34 @@ static bool scan(uint64_t startup) {
     last_error.clear();
     return true;
 }
+
+// Resolve the APK sample's data-system entry without patching or instrumenting
+// any managed/native code. This is intentionally a metadata-only probe.
+static void metadata_probe(FILE *out) {
+    void *damage = rpc_find_class("Velvhem.Majo.Gameplay.Ecs.DamageSystem");
+    void *team = rpc_find_class("Velvhem.Majo.Gameplay.Ecs.TeamService");
+    void *health = rpc_find_class("Velvhem.Majo.Gameplay.Ecs.Health");
+    fprintf(out, "healthdiag metadata hook=0 damageClass=%p teamClass=%p healthClass=%p\n",
+            damage, team, health);
+    if (!damage || !team || !health || !il2cpp_class_get_methods || !il2cpp_method_get_name) return;
+    void *iter = nullptr;
+    unsigned found = 0;
+    while (auto method = il2cpp_class_get_methods((Il2CppClass *)damage, &iter)) {
+        const char *name = il2cpp_method_get_name(method);
+        if (name && (!strcmp(name, "Run") || !strcmp(name, "MoveNext"))) {
+            fprintf(out, "damage method name=%s VA=%p\n", name, method->methodPointer);
+            ++found;
+        }
+    }
+    const char *fields[] = {"_damageRequests", "_healthPool", "_world", "_friendPool", "_enemyPool"};
+    const char *owners[] = {"Velvhem.Majo.Gameplay.Ecs.DamageSystem", "Velvhem.Majo.Gameplay.Ecs.DamageSystem", "Velvhem.Majo.Gameplay.Ecs.DamageSystem", "Velvhem.Majo.Gameplay.Ecs.TeamService", "Velvhem.Majo.Gameplay.Ecs.TeamService"};
+    for (int i = 0; i < 5; ++i) {
+        void *klass = rpc_find_class(owners[i]); size_t off = 0;
+        if (klass && rpc_field_offset(klass, fields[i], &off))
+            fprintf(out, "damage field owner=%s name=%s offset=0x%zx\n", owners[i], fields[i], off);
+    }
+    fprintf(out, "healthdiag metadata methods=%u code_patch=0\n", found);
+}
 static void on_tick(void *, DobbyRegisterContext *context) {
 #if defined(__aarch64__)
     // Dobby preserves the original arguments/registers and executes relocated code.
@@ -216,6 +245,7 @@ static void command(FILE *out, const char *args) {
         LOGI("healthhook stop mode=%s", mode_name());
         fprintf(out, "healthhook stopped writes=%" PRIu64 "\n", writes); return;
     }
+    if (!strcmp(args, "metadata")) { metadata_probe(out); return; }
     if (!strcmp(args, "status")) {
         if (enabled) deadline = now_ms() + 5000;
         fprintf(out, "healthhook enabled=%d installed=%d callbacks=%" PRIu64 " scans=%" PRIu64

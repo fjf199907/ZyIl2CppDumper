@@ -149,7 +149,8 @@ static void metadata_probe(FILE *out) {
     unsigned found = 0;
     while (auto method = il2cpp_class_get_methods((Il2CppClass *)damage, &iter)) {
         const char *name = il2cpp_method_get_name(method);
-        if (name && (!strcmp(name, "Run") || !strcmp(name, "MoveNext"))) {
+        if (name && (strstr(name, ".Run") || !strcmp(name, "Run") ||
+                     !strcmp(name, "MoveNext"))) {
             fprintf(out, "damage method name=%s VA=%p\n", name, method->methodPointer);
             ++found;
         }

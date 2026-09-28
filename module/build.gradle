@@ -11,12 +11,14 @@ android {
     ndkVersion = '28.2.13676358'
 
     defaultConfig {
+        ndk { abiFilters "arm64-v8a" }
         minSdk = rootProject.ext.minSdk
         targetSdk = rootProject.ext.targetSdk
 
         externalNativeBuild {
             cmake {
                 arguments("-DMODULE_NAME:STRING=$moduleLibraryName")
+                targets(moduleLibraryName)
             }
         }
     }
@@ -100,7 +102,7 @@ androidComponents {
             // AAR packs native libs at jni/<abi>/lib*.so; Zygisk expects them
             // at zygisk/<abi>.so, so map each entry straight to its final path.
             from(aarArtifact.map { zipTree(it) }) {
-                include 'jni/*/*.so'
+                include "jni/*/lib${moduleLibraryName}.so"
                 includeEmptyDirs = false
                 eachFile { it.path = "zygisk/${it.relativePath.segments[1]}.so" }
             }

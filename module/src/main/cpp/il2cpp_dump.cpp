@@ -346,11 +346,36 @@ struct HookSlot {
     pthread_mutex_t lock;
 
     int      field_count;
+    volatile bool     dmg_intercept;
+    volatile uint64_t friend_pool;
+    volatile uint64_t enemy_pool;
+    volatile int64_t  defense_value;
+    volatile int64_t  attack_mult;
     SpecItem fields[8];
     HookRecord records[256];
 };
 
 static HookSlot g_hooks[4] = {};
+
+// 通过 EcsPool 的 sparse 数组判断 eid 是否属于该 pool
+static bool entity_in_pool(uint64_t pool_addr, int32_t eid) {
+    if (pool_addr < 0x6000000000ULL || pool_addr > 0x8000000000ULL) return false;
+    if (eid < 0) return false;
+
+    uint64_t sparse = 0;
+    memcpy(&sparse, (void*)(pool_addr + 0x40), 8);
+    if (sparse < 0x6000000000ULL || sparse > 0x8000000000ULL) return false;
+
+    uint64_t sparse_len = 0;
+    memcpy(&sparse_len, (void*)(sparse + 0x18), 8);
+    if (sparse_len == 0 || sparse_len > 65536) return false;
+    if ((uint64_t)eid >= sparse_len) return false;
+
+    int32_t di = 0;
+    memcpy(&di, (void*)(sparse + 0x20 + (uint64_t)eid * 4), 4);
+    return di > 0;
+}
+
 
 static void hook_generic(int idx, void* a0, void* a1, void* a2, void* a3);
 
@@ -463,6 +488,54 @@ static void hook_generic(int idx, void* a0, void* a1, void* a2, void* a3) {
     }
     h.write_idx = wi + 1;
     __atomic_add_fetch((int*)&h.hit_count, 1, __ATOMIC_RELAXED);
+    
+    // ---- DamageSystem.Run 伤害拦截 ----
+    if (h.dmg_intercept) {
+        uint64_t dmgreq_pool = 0;
+        memcpy(&dmgreq_pool, (void*)((uint64_t)a0 + 0x68), 8);
+
+        if (dmgreq_pool >= 0x6000000000ULL && dmgreq_pool <= 0x8000000000ULL) {
+            uint64_t dense = 0;
+            int32_t  cnt   = 0;
+            memcpy(&dense, (void*)(dmgreq_pool + 0x38), 8);
+            memcpy(&cnt,   (void*)(dmgreq_pool + 0x48), 4);
+
+            if (dense >= 0x6000000000ULL && dense <= 0x8000000000ULL &&
+                cnt > 0 && cnt < 8192) {
+
+                for (int32_t i = 0; i < cnt; ++i) {
+                    uint64_t item = dense + 0x20 + (uint64_t)i * 0x38;
+
+                    int32_t src_eid = 0;
+                    int32_t tgt_eid = 0;
+                    int64_t value   = 0;
+                    memcpy(&src_eid, (void*)(item + 0x10), 4);
+                    memcpy(&tgt_eid, (void*)(item + 0x18), 4);
+                    memcpy(&value,   (void*)(item + 0x20), 8);
+
+                    bool src_enemy  = entity_in_pool(h.enemy_pool,  src_eid);
+                    bool tgt_friend = entity_in_pool(h.friend_pool, tgt_eid);
+                    bool src_friend = entity_in_pool(h.friend_pool, src_eid);
+                    bool tgt_enemy  = entity_in_pool(h.enemy_pool,  tgt_eid);
+
+                    if (src_enemy && tgt_friend) {
+                        int64_t new_val = (h.defense_value > 0) ? h.defense_value : 1;
+                        if (value != new_val) {
+                            memcpy((void*)(item + 0x20), &new_val, 8);
+                        }
+                    } else if (src_friend && tgt_enemy) {
+                        if (h.attack_mult > 1) {
+                            int64_t new_val = value * h.attack_mult;
+                            if (h.attack_mult != 0 && new_val / h.attack_mult == value) {
+                                memcpy((void*)(item + 0x20), &new_val, 8);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 
     // 恢复原码 → 调原函数 → 重打 patch
     pthread_mutex_lock(&h.lock);
@@ -490,6 +563,11 @@ static int hook_install_ex(uint64_t target, const char* name, const char* spec) 
         if (!parse_spec(h, spec ? spec : "this:i64")) return -3;
         h.hit_count = 0;
         h.write_idx = 0;
+        h.dmg_intercept = false;
+        h.friend_pool   = 0;
+        h.enemy_pool    = 0;
+        h.defense_value = 1;
+        h.attack_mult   = 1;
         pthread_mutex_init(&h.lock, nullptr);
         write_jump(target, (uint64_t)g_entry_table[i]);
         h.active = true;
@@ -1742,6 +1820,36 @@ static void rpc_handle(const char *cmd, FILE *out) {
             rpc_static_refs(out, image, target);
         else fprintf(out, "ERR: usage: staticrefs <image.dll> <FullClassName>\n");
     }
+    else if (strncmp(cmd, "dmg_cfg ", 8) == 0) {
+        int slot = -1;
+        unsigned long long fp = 0, ep = 0;
+        long long dv = 1, am = 1;
+        int got = sscanf(cmd + 8, "%d %llx %llx %lld %lld",
+                         &slot, &fp, &ep, &dv, &am);
+        if (got >= 3 && slot >= 0 && slot < 4 && g_hooks[slot].active) {
+            HookSlot& h = g_hooks[slot];
+            h.friend_pool   = (uint64_t)fp;
+            h.enemy_pool    = (uint64_t)ep;
+            h.defense_value = (got >= 4) ? dv : 1;
+            h.attack_mult   = (got >= 5) ? am : 1;
+            h.dmg_intercept = (h.friend_pool != 0 && h.enemy_pool != 0);
+            fprintf(out, "dmg_cfg ok slot=%d friend=0x%llx enemy=0x%llx "
+                         "def=%lld atk=%lld active=%d\n",
+                    slot, fp, ep, dv, am, h.dmg_intercept ? 1 : 0);
+        } else if (strcmp(cmd, "dmg_cfg off") == 0) {
+            for (int i = 0; i < 4; ++i) {
+                if (g_hooks[i].active) {
+                    g_hooks[i].dmg_intercept = false;
+                    g_hooks[i].friend_pool = 0;
+                    g_hooks[i].enemy_pool = 0;
+                }
+            }
+            fprintf(out, "dmg_cfg off (all slots)\n");
+        } else {
+            fprintf(out, "ERR: usage: dmg_cfg <slot> <friend_pool> <enemy_pool> [def_val] [atk_mult]\n"
+                         "     or: dmg_cfg off\n");
+        }
+    }
     else if (strncmp(cmd, "hook ", 5) == 0) {
         uint64_t addr = 0;
         char rest[256] = {0};
@@ -1951,6 +2059,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      rpcinfo | apiinfo | classfromname <FullClassName> | methodinfo <FullClassName> | methodaddr <FullClassName> <method> | objectclass <object_addr_hex> | fieldoffset <FullClassName> <field> | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
                      "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      healthhook start <value> <interval_ms> | healthhook status | healthhook stop\n"
+                     "      dmg_cfg <slot> <friend_pool> <enemy_pool> [def_val] [atk_mult]\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

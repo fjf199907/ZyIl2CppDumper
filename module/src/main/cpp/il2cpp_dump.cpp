@@ -1053,6 +1053,44 @@ static void rpc_dump_methods(FILE *out, const char *cls) {
     }
     fprintf(out, "\n--- found %d ---\n", found);
 }
+
+static void rpc_method_addr(FILE *out, const char *args) {
+    char cls[384] = {}, method_name[128] = {}, extra = 0;
+    if (sscanf(args, "%383s %127s %c", cls, method_name, &extra) != 2) {
+        fprintf(out, "ERR: usage: methodaddr <FullClassName> <method>\n");
+        return;
+    }
+    void *domain = g_rpc_api.domain_get();
+    if (!domain) { fprintf(out, "ERR: no domain\n"); return; }
+    size_t asm_count = 0;
+    void **assemblies = (void **)g_rpc_api.domain_get_assemblies(domain, &asm_count);
+    for (size_t i = 0; i < asm_count; ++i) {
+        void *image = g_rpc_api.assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        size_t class_count = g_rpc_api.image_get_class_count(image);
+        for (size_t j = 0; j < class_count; ++j) {
+            auto *klass = (Il2CppClass *)g_rpc_api.image_get_class(image, j);
+            if (!klass) continue;
+            const char *name = g_rpc_api.class_get_name(klass);
+            const char *ns = g_rpc_api.class_get_namespace(klass);
+            char full[512] = {};
+            snprintf(full, sizeof(full), "%s.%s", ns ? ns : "", name ? name : "");
+            if (strcmp(cls, name ? name : "") != 0 && strcmp(cls, full) != 0) continue;
+            void *iter = nullptr;
+            while (auto *method = il2cpp_class_get_methods(klass, &iter)) {
+                const char *mn = il2cpp_method_get_name(method);
+                if (!mn || strcmp(mn, method_name) != 0) continue;
+                uint64_t va = (uint64_t)method->methodPointer;
+                uint64_t rva = va >= il2cpp_base ? va - il2cpp_base : 0;
+                fprintf(out, "methodaddr class=%s method=%s VA=0x%" PRIx64
+                             " RVA=0x%" PRIx64 " base=0x%" PRIx64 "\n",
+                        full, method_name, va, rva, il2cpp_base);
+                return;
+            }
+        }
+    }
+    fprintf(out, "ERR: method not found class=%s method=%s\n", cls, method_name);
+}
 static void rpc_list_static(FILE *out, const char *cls) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) return;
@@ -1537,6 +1575,9 @@ static void rpc_handle(const char *cmd, FILE *out) {
         if (!klass) fprintf(out, "ERR: class not found %s\n", cmd + 11);
         else { fprintf(out, "methodinfo class=%s\n", cmd + 11); rpc_dump_class(out, klass); }
     }
+    else if (strncmp(cmd, "methodaddr ", 11) == 0) {
+        rpc_method_addr(out, cmd + 11);
+    }
     else if (strncmp(cmd, "objectclass ", 12) == 0) {
         uint64_t object = 0; char extra;
         if (sscanf(cmd + 12, "%" SCNx64 " %c", &object, &extra) == 1) rpc_object_class(out, object);
@@ -1840,7 +1881,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      healthdump <addr> [limit] | healthpooldump <pool> [limit] | methods <name>\n"
                      "      staticrefs <image.dll> <FullClassName>\n"
                      "      taskrefs <array_addr_hex> <count:1..64>\n"
-                     "      rpcinfo | apiinfo | classfromname <FullClassName> | methodinfo <FullClassName> | objectclass <object_addr_hex> | fieldoffset <FullClassName> <field> | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
+                     "      rpcinfo | apiinfo | classfromname <FullClassName> | methodinfo <FullClassName> | methodaddr <FullClassName> <method> | objectclass <object_addr_hex> | fieldoffset <FullClassName> <field> | objrefs <object_addr_hex> | runnerroots <runners_array_addr> | runnergraph <runners_array_addr>\n"
                      "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"

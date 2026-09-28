@@ -1579,7 +1579,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
     else if (strcmp(cmd, "rpcinfo") == 0) {
         fprintf(out, "protocol=2 build=majo-readonly-diag-20260927-v1 compiled=%s %s pid=%d ptrsize=%zu\n",
                 __DATE__, __TIME__, getpid(), sizeof(uintptr_t));
-        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs,fieldlayout,healthhook\n");
+        fprintf(out, "capabilities=checked_read,staticrefs,taskrefs,objrefs,fieldlayout,healthhook,healthhook_diag_v1\n");
         fprintf(out, "diagnostic_revision=2\n");
         fprintf(out, "limits: read_bytes=4096 task_slots=64 task_fields=128 metadata_classes=250000\n");
     }

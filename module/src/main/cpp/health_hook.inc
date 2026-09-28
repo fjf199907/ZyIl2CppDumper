@@ -12,6 +12,11 @@ static bool installed = false, enabled = false;
 static uint64_t hook_address = 0;
 static uint64_t deadline = 0, next_scan = 0, interval_ms = 250;
 static int64_t target = 1;
+enum class Mode { Count, Read, Write };
+static Mode mode = Mode::Write;
+static const char *mode_name() {
+    return mode == Mode::Count ? "count" : mode == Mode::Read ? "read" : "write";
+}
 static uint64_t callbacks = 0, scans = 0, writes = 0, dropped = 0;
 static uint64_t last_startup = 0, last_hash = UINT64_MAX;
 static void *startup_class = nullptr, *character_class = nullptr, *health_system_class = nullptr;
@@ -105,6 +110,7 @@ static bool scan(uint64_t startup) {
         const uint64_t address = health.dense + 0x20 + (uint64_t)slot * 0x18;
         int64_t values[2];
         if (!rpc_read_exact(address, values, sizeof(values))) return fail("Health value unreadable");
+        if (mode != Mode::Write) continue;
         // Do not resurrect dead entities or touch uninitialised components.
         if (values[0] <= 0 || values[1] <= 0 || target > values[1] || values[0] == target) continue;
         int32_t current_hs = 0, current_es = 0;
@@ -137,6 +143,7 @@ static void on_tick(void *, DobbyRegisterContext *context) {
     const uint64_t now = now_ms();
     if (now >= deadline) { enabled = false; event("healthhook stopped: PC heartbeat expired"); return; }
     ++callbacks;
+    if (mode == Mode::Count) return;
     if (now < next_scan) return;
     next_scan = now + interval_ms;
     ++scans;
@@ -199,31 +206,42 @@ static bool install(FILE *out) {
 static void stop() {
     std::lock_guard<std::mutex> lock(mutex);
     enabled = false;
+    LOGI("healthhook disconnect stop mode=%s", mode_name());
     // Keep the trampoline installed until process exit, avoiding unhook races.
 }
 static void command(FILE *out, const char *args) {
     std::lock_guard<std::mutex> lock(mutex);
     if (!strcmp(args, "stop")) {
         enabled = false;
+        LOGI("healthhook stop mode=%s", mode_name());
         fprintf(out, "healthhook stopped writes=%" PRIu64 "\n", writes); return;
     }
     if (!strcmp(args, "status")) {
         if (enabled) deadline = now_ms() + 5000;
         fprintf(out, "healthhook enabled=%d installed=%d callbacks=%" PRIu64 " scans=%" PRIu64
-                     " writes=%" PRIu64 " dropped=%" PRIu64 "\n", enabled, installed, callbacks, scans, writes, dropped);
+                     " writes=%" PRIu64 " dropped=%" PRIu64 " mode=%s\n", enabled, installed, callbacks, scans, writes, dropped, mode_name());
         for (const auto &line : events) fprintf(out, "%s\n", line.c_str());
         events.clear(); return;
     }
-    int64_t value; unsigned milliseconds; char extra;
-    if (sscanf(args, "start %" SCNd64 " %u %c", &value, &milliseconds, &extra) != 2 ||
-        value < 0 || milliseconds < 50 || milliseconds > 10000) {
-        fprintf(out, "ERR: healthhook start <0..INT64_MAX> <50..10000 ms> | status | stop\n"); return;
+    int64_t value = 1; unsigned milliseconds = 250; char extra;
+    Mode requested;
+    if (sscanf(args, "count %u %c", &milliseconds, &extra) == 1) requested = Mode::Count;
+    else if (sscanf(args, "read %u %c", &milliseconds, &extra) == 1) requested = Mode::Read;
+    else if (sscanf(args, "start %" SCNd64 " %u %c", &value, &milliseconds, &extra) == 2)
+        requested = Mode::Write;
+    else {
+        fprintf(out, "ERR: healthhook count <ms> | read <ms> | start <value> <ms> | status | stop\n"); return;
+    }
+    if (value < 0 || milliseconds < 50 || milliseconds > 10000) {
+        fprintf(out, "ERR: invalid healthhook value/interval\n"); return;
     }
     if (!install(out)) return;
+    mode = requested;
     target = value; interval_ms = milliseconds; next_scan = 0;
     deadline = now_ms() + 5000; enabled = true;
     callbacks = scans = writes = dropped = 0;
     last_startup = 0; last_hash = UINT64_MAX; events.clear(); last_error.clear();
-    fprintf(out, "healthhook started value=%" PRId64 " interval_ms=%u snapshot=false\n", target, milliseconds);
+    fprintf(out, "healthhook started value=%" PRId64 " interval_ms=%u snapshot=false mode=%s\n", target, milliseconds, mode_name());
+    LOGI("healthhook start mode=%s pid=%d interval_ms=%u", mode_name(), getpid(), milliseconds);
 }
 } // namespace health_hook

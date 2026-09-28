@@ -10,3 +10,12 @@
 .cxx
 repomix-output.xml
 repomix.config.json
+
+# Local build caches and machine-specific files
+/.gradle-user/
+/.gradle-user-home/
+/module/build/
+__pycache__/
+*.pyc
+.env
+.env.local

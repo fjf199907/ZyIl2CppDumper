@@ -356,6 +356,7 @@ struct HookSlot {
 };
 
 static HookSlot g_hooks[4] = {};
+static volatile uint64_t g_ext_damage_request_pool = 0;
 
 // 通过 EcsPool 的 sparse 数组判断 eid 是否属于该 pool
 static bool entity_in_pool(uint64_t pool_addr, int32_t eid) {
@@ -488,11 +489,13 @@ static void hook_generic(int idx, void* a0, void* a1, void* a2, void* a3) {
     }
     h.write_idx = wi + 1;
     __atomic_add_fetch((int*)&h.hit_count, 1, __ATOMIC_RELAXED);
-    
+
     // ---- DamageSystem.Run 伤害拦截 ----
     if (h.dmg_intercept) {
-        uint64_t dmgreq_pool = 0;
-        memcpy(&dmgreq_pool, (void*)((uint64_t)a0 + 0x68), 8);
+        uint64_t dmgreq_pool = g_ext_damage_request_pool;
+        if (dmgreq_pool < 0x6000000000ULL || dmgreq_pool > 0x8000000000ULL) {
+            memcpy(&dmgreq_pool, (void*)((uint64_t)a0 + 0x68), 8);
+        }
 
         if (dmgreq_pool >= 0x6000000000ULL && dmgreq_pool <= 0x8000000000ULL) {
             uint64_t dense = 0;
@@ -642,9 +645,6 @@ static const char *const g_il2cpp_api_names[] = {
 static void rpc_api_info(FILE *out) {
     const size_t count = sizeof(g_il2cpp_api_names) / sizeof(g_il2cpp_api_names[0]);
     fprintf(out, "apiinfo count=%zu\n", count);
-    // Do not call dlopen/dlsym from the RPC thread.  Android linker handles
-    // are not uniformly safe across Unity builds.  Report the APIs resolved
-    // by the module's existing metadata table instead.
     for (size_t i = 0; i < count; ++i) {
         bool available = false;
         const char *n = g_il2cpp_api_names[i];
@@ -736,8 +736,6 @@ static void rpc_field_offset_cmd(FILE *out, const char *args) {
             cls, field, (uintptr_t)klass, offset);
 }
 
-// Defined with the checked RPC read helpers below; health pool diagnostics
-// are declared earlier in this translation unit.
 static bool rpc_read_exact(uint64_t address, void *value, size_t size);
 
 static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
@@ -750,8 +748,6 @@ static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
         return false;
     }
 
-    // This scan is read-only. Mappings can disappear during Unity GC, so use
-    // the existing SIGSEGV/SIGBUS guard for the RPC thread.
     install_dump_guard();
     g_dump_guard_active = 1;
 
@@ -765,7 +761,6 @@ static bool rpc_scan_rw_instances(FILE *out, void *klass, int limit) {
         int n = sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %*s %*s %*s %511[^\n]",
                        &start, &end, perms, path);
         if (n < 3 || end <= start) continue;
-        // Managed objects normally live in writable private mappings.
         if (perms[0] != 'r' || perms[1] != 'w' || perms[3] != 'p') continue;
         if (n >= 4 && (strstr(path, "[stack") || strstr(path, "[vdso") || strstr(path, "[vvar"))) continue;
         uint64_t size = end - start;
@@ -887,9 +882,6 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
         return false;
     }
 
-    // HealthLinkService fields from the runtime class layout:
-    //   +0x10 EcsWorld* _defaultWorld
-    //   +0x28 EcsPool<Health>* _healthPool
     uint64_t world = 0;
     uint64_t pool = 0;
     memcpy(&world, (void *)(service + 0x10), sizeof(world));
@@ -901,9 +893,6 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
         return false;
     }
 
-    // Resolve the concrete inflated generic class from the live object's
-    // klass pointer. The generic definition reported by `class EcsPool` can
-    // expose zero offsets, while the inflated runtime class has real offsets.
     uint64_t poolKlass = 0;
     memcpy(&poolKlass, (void *)pool, sizeof(poolKlass));
     size_t denseOff = 0x38;
@@ -942,7 +931,6 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
     }
 
     uint64_t sparseLen = 0;
-    // Il2CppArray::max_length is at +0x18 on this arm64 runtime.
     memcpy(&sparseLen, (void *)(sparse + 0x18), sizeof(sparseLen));
     if (sparseLen > 1000000) sparseLen = 1000000;
     fprintf(out, "world=0x%" PRIx64 " pool=0x%" PRIx64
@@ -956,8 +944,6 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
     for (uint64_t entity = 0; entity < sparseLen && shown < limit; ++entity) {
         int32_t denseIndex = -1;
         memcpy(&denseIndex, (void *)(sparse + 0x20 + entity * sizeof(int32_t)), sizeof(denseIndex));
-        // LeoEcsLite reserves dense slot 0 as the "component absent" sentinel.
-        // Real components occupy slots [1, denseCount).
         if (denseIndex <= 0 || denseIndex >= denseCount) continue;
 
         uint64_t item = dense + 0x20 + (uint64_t)denseIndex * 0x18;
@@ -978,9 +964,6 @@ static bool rpc_health_dump(FILE *out, uint64_t service, int limit) {
     return true;
 }
 
-// Read a caller-supplied EcsPool<Health> without dereferencing untrusted
-// pointers.  The command deliberately reports ambiguity instead of turning
-// a guessed dense layout into a fake HP value.
 static bool rpc_health_pool_dump(FILE *out, uint64_t pool, int limit) {
     if (limit <= 0 || limit > 4096) limit = 256;
     if (pool < 0x100000000ULL || pool > 0x800000000000ULL) {
@@ -1156,7 +1139,6 @@ static void rpc_method_addr(FILE *out, const char *args) {
             if (strcmp(cls, name ? name : "") != 0 && strcmp(cls, full) != 0) continue;
             const MethodInfo *selected = nullptr;
             unsigned matches = 0;
-            // Prefer exact names; only then accept an explicit-interface suffix.
             for (int pass = 0; pass < 2 && matches == 0; ++pass) {
                 void *iter = nullptr;
                 while (auto *method = il2cpp_class_get_methods(klass, &iter)) {
@@ -1170,7 +1152,7 @@ static void rpc_method_addr(FILE *out, const char *args) {
                 }
             }
             if (matches > 1) {
-                fprintf(out, "ERR: ambiguous method class=%s method=%s matches=%u; use full name; overloads require signature selection\n",
+                fprintf(out, "ERR: ambiguous method class=%s method=%s matches=%u\n",
                         full, method_name, matches);
                 return;
             }
@@ -1188,6 +1170,7 @@ static void rpc_method_addr(FILE *out, const char *args) {
     }
     fprintf(out, "ERR: method not found class=%s method=%s\n", cls, method_name);
 }
+
 static void rpc_list_static(FILE *out, const char *cls) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) return;
@@ -1272,7 +1255,7 @@ static bool rpc_read_exact(uint64_t address, void *value, size_t size) {
     iovec remote{reinterpret_cast<void *>(static_cast<uintptr_t>(address)), size};
     ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
     if (got == static_cast<ssize_t>(size)) return true;
-    if (got >= 0) errno = EFAULT; // Partial reads are not complete snapshots.
+    if (got >= 0) errno = EFAULT;
     return false;
 }
 
@@ -1291,8 +1274,6 @@ static bool rpc_read_checked(FILE *out, uint64_t address, void *value, size_t si
     return false;
 }
 
-// Fast, read-only PlayerLoop root inspection.  This deliberately returns
-// addresses only; Python can decide which active task chain is relevant.
 static void rpc_runner_roots(FILE *out, uint64_t root) {
     if (!root) { fprintf(out, "ERR: runner root is null\n"); return; }
     uint64_t header[4] = {};
@@ -1358,8 +1339,6 @@ static void rpc_runner_graph(FILE *out, uint64_t root) {
     }
 }
 
-// Inspect only caller-selected array slots and direct fields of metadata-known classes.
-// Unknown/inflated class pointers are never passed to IL2CPP class APIs.
 static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single = false) {
     if (sizeof(uintptr_t) != 8) {
         fprintf(out, "ERR: taskrefs currently requires ARM64/x64 array layout\n"); return;
@@ -1440,7 +1419,6 @@ static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single
             if (!ft) continue;
             const int kind = il2cpp_type_get_type(ft);
             fprintf(out, "  +0x%zx %s kind=0x%x", offset, fn ? fn : "?", kind);
-            // Generic fields might be inline structs: report without guessing layout.
             const bool ref = kind == IL2CPP_TYPE_CLASS || kind == IL2CPP_TYPE_OBJECT ||
                              kind == IL2CPP_TYPE_STRING || kind == IL2CPP_TYPE_SZARRAY ||
                              kind == IL2CPP_TYPE_ARRAY;
@@ -1476,8 +1454,6 @@ static void rpc_task_refs(FILE *out, uint64_t array, unsigned count, bool single
     fprintf(out, "Direct declared fields only; generic/inline/inherited fields are not traversed.\n");
 }
 
-// Resolve instantiated metadata from a concrete owner's field, never from a
-// caller-supplied class pointer. No object data or managed methods are touched.
 static void rpc_field_layout(FILE *out, const char *owner_name, const char *field_name) {
     if (!il2cpp_class_from_type || !il2cpp_class_is_valuetype ||
         !il2cpp_class_value_size || !il2cpp_class_instance_size ||
@@ -1577,7 +1553,6 @@ static void rpc_static_refs(FILE *out, const char *image_filter, const char *tar
             const auto flags = il2cpp_field_get_flags((FieldInfo *)field);
             if (!(flags & FIELD_ATTRIBUTE_STATIC) || (flags & FIELD_ATTRIBUTE_LITERAL)) continue;
             const size_t offset = g_rpc_api.field_get_offset(field);
-            // Thread statics use a sentinel offset; bound regular static storage offsets.
             if (offset > 16 * 1024 * 1024) { ++skipped; continue; }
             const Il2CppType *type = (const Il2CppType *)g_rpc_api.field_get_type(field);
             if (!type) continue;
@@ -1595,7 +1570,6 @@ static void rpc_static_refs(FILE *out, const char *image_filter, const char *tar
             }
             uint64_t object = 0, object_class = 0;
             ++checked;
-            // Read existing slots without Field::StaticGetValue or managed class constructors.
             if (!rpc_read_pointer((uint64_t)storage + offset, &object)) { ++unreadable; continue; }
             if (!object) continue;
             if (!rpc_read_pointer(object, &object_class)) { ++unreadable; continue; }
@@ -1610,6 +1584,7 @@ static void rpc_static_refs(FILE *out, const char *image_filter, const char *tar
     fprintf(out, "staticrefs=%d checked=%d unreadable=%d skipped=%d target=%s image=%s\n",
             found, checked, unreadable, skipped, target_name, image_filter);
 }
+
 static int rpc_scan(FILE *out, const char *imagePattern, const char *classPattern, bool dumpAllInMatchedImage) {
     void *domain = g_rpc_api.domain_get();
     if (!domain) return -1;
@@ -1850,6 +1825,15 @@ static void rpc_handle(const char *cmd, FILE *out) {
                          "     or: dmg_cfg off\n");
         }
     }
+    else if (strncmp(cmd, "dmg_pool ", 9) == 0) {
+        unsigned long long p = 0;
+        if (sscanf(cmd + 9, "%llx", &p) == 1) {
+            g_ext_damage_request_pool = (uint64_t)p;
+            fprintf(out, "dmg_pool ok = 0x%llx\n", p);
+        } else {
+            fprintf(out, "ERR: usage: dmg_pool <hex>\n");
+        }
+    }
     else if (strncmp(cmd, "hook ", 5) == 0) {
         uint64_t addr = 0;
         char rest[256] = {0};
@@ -2060,6 +2044,7 @@ static void rpc_handle(const char *cmd, FILE *out) {
                      "      fieldlayout <OwnerClass> <FieldName>\n"
                      "      healthhook start <value> <interval_ms> | healthhook status | healthhook stop\n"
                      "      dmg_cfg <slot> <friend_pool> <enemy_pool> [def_val] [atk_mult]\n"
+                     "      dmg_pool <pool_hex>\n"
                      "      hook <addr> [name] [spec] | unhook <idx> | unhookall | hits <slot> [n]\n"
                      "      read <addr> <sz> | write <addr> <hex> | readf <addr> | readi <addr>\n"
                      "      readu64 <addr> | readstr <addr> [max]\n"

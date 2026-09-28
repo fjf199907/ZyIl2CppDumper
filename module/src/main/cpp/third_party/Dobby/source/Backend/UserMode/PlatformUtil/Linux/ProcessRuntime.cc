@@ -11,10 +11,10 @@
 #include <vector>
 #include <algorithm>
 
-#define LINE_MAX 2048
+#define DOBBY_MAP_LINE_MAX 2048
 
 static bool memory_region_comparator(MemRange a, MemRange b) {
-  return (a.start < b.start);
+  return (a.start() < b.start());
 }
 
 stl::vector<MemRegion> regions;
@@ -26,11 +26,11 @@ const stl::vector<MemRegion> &ProcessRuntime::getMemoryLayout() {
     return regions;
 
   while (!feof(fp)) {
-    char line_buffer[LINE_MAX + 1];
-    fgets(line_buffer, LINE_MAX, fp);
+    char line_buffer[DOBBY_MAP_LINE_MAX + 1];
+    if (!fgets(line_buffer, sizeof(line_buffer), fp)) break;
 
     // ignore the rest of characters
-    if (strlen(line_buffer) == LINE_MAX && line_buffer[LINE_MAX] != '\n') {
+    if (strlen(line_buffer) == DOBBY_MAP_LINE_MAX && line_buffer[DOBBY_MAP_LINE_MAX] != '\n') {
       // Entry not describing executable data. Skip to end of line to set up
       // reading the next entry.
       int c;
@@ -102,11 +102,11 @@ static stl::vector<RuntimeModule> &get_process_map_with_proc_maps() {
     return *modules;
 
   while (!feof(fp)) {
-    char line_buffer[LINE_MAX + 1];
-    fgets(line_buffer, LINE_MAX, fp);
+    char line_buffer[DOBBY_MAP_LINE_MAX + 1];
+    if (!fgets(line_buffer, sizeof(line_buffer), fp)) break;
 
     // ignore the rest of characters
-    if (strlen(line_buffer) == LINE_MAX && line_buffer[LINE_MAX] != '\n') {
+    if (strlen(line_buffer) == DOBBY_MAP_LINE_MAX && line_buffer[DOBBY_MAP_LINE_MAX] != '\n') {
       // Entry not describing executable data. Skip to end of line to set up
       // reading the next entry.
       int c;
@@ -156,14 +156,14 @@ static stl::vector<RuntimeModule> &get_process_map_with_proc_maps() {
     char *path_buffer = line_buffer + path_index;
     if (*path_buffer == 0 || *path_buffer == '\n' || *path_buffer == '[')
       continue;
-    RuntimeModule module;
+    RuntimeModule module{};
 
     // strip
     if (path_buffer[strlen(path_buffer) - 1] == '\n') {
       path_buffer[strlen(path_buffer) - 1] = 0;
     }
     strncpy(module.path, path_buffer, sizeof(module.path) - 1);
-    module.load_address = (void *)region_start;
+    module.base = (void *)region_start;
     modules->push_back(module);
 
 #if 0
@@ -191,11 +191,11 @@ static stl::vector<RuntimeModule> get_process_map_with_linker_iterator() {
         if (info->dlpi_name && info->dlpi_name[0] == '/')
           strcpy(module.path, info->dlpi_name);
 
-        module.load_address = (void *)info->dlpi_addr;
+        module.base = (void *)info->dlpi_addr;
         for (size_t i = 0; i < info->dlpi_phnum; ++i) {
           if (info->dlpi_phdr[i].p_type == PT_LOAD) {
             uintptr_t load_bias = (info->dlpi_phdr[i].p_vaddr - info->dlpi_phdr[i].p_offset);
-            module.load_address = (void *)((addr_t)module.load_address + load_bias);
+            module.base = (void *)((addr_t)module.base + load_bias);
             break;
           }
         }

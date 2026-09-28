@@ -183,3 +183,18 @@ void OSPrint::VPrint(const char *format, va_list args) {
   vprintf(format, args);
 #endif
 }
+
+// Keep the platform-dependent definition out of dobby/common.h's include cycle.
+namespace features { namespace android {
+void make_memory_readable(void *address, size_t size) {
+#if defined(ANDROID)
+  const auto page_size = static_cast<uintptr_t>(OSMemory::PageSize());
+  const auto start = reinterpret_cast<uintptr_t>(address);
+  if (!address || !size || !page_size || size - 1 > UINTPTR_MAX - start) return;
+  const auto first = start - start % page_size;
+  const auto last = (start + size - 1) - (start + size - 1) % page_size;
+  if (last - first > UINTPTR_MAX - page_size) return;
+  OSMemory::SetPermission(reinterpret_cast<void *>(first), last - first + page_size, kReadExecute);
+#endif
+}
+}} // namespace features::android

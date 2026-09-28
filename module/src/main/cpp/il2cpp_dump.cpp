@@ -1904,6 +1904,43 @@ static void rpc_handle(const char *cmd, FILE *out) {
             fprintf(out, "\"\n");
         }
     }
+    else if (strncmp(cmd, "bulk_write_q ", 13) == 0) {
+        const char *p = cmd + 13;
+        unsigned int count = 0;
+        if (sscanf(p, "%u", &count) != 1 || count > 1024) {
+            fprintf(out, "ERR: bulk_write_q bad count\n");
+            return;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        while (*p == ' ' || *p == '\t') p++;
+
+        unsigned int written = 0;
+        install_dump_guard();
+        for (unsigned int i = 0; i < count; ++i) {
+            char *end = nullptr;
+            unsigned long long addr = strtoull(p, &end, 16);
+            if (end == p) break;
+            p = end;
+            while (*p == ' ' || *p == '\t') p++;
+
+            unsigned long long val = strtoull(p, &end, 16);
+            if (end == p) break;
+            p = end;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!addr) continue;
+
+            if (sigsetjmp(g_dump_jmp, 1) == 0) {
+                g_dump_guard_active = 1;
+                *(volatile unsigned long long *)(uintptr_t)addr = val;
+                g_dump_guard_active = 0;
+                written++;
+            }
+            g_dump_guard_active = 0;
+        }
+        remove_dump_guard();
+        fprintf(out, "bulk_wrote=%u\n", written);
+    }
     else {
         fprintf(out, "ERR: unknown cmd\n");
         fprintf(out, "cmds: ping | base | images | scan <img> <cls> | dumpimage <img>\n"
